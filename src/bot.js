@@ -113,7 +113,23 @@ class WhatsAppBotEngine extends EventEmitter {
       const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
       const { version } = await fetchLatestBaileysVersion();
       const pinoLogger = pino ? pino({
-        level: 'warn'
+        level: 'debug'
+      }, {
+        write: (str) => {
+          try {
+            const parsed = JSON.parse(str);
+            const msg = parsed.msg || JSON.stringify(parsed);
+            if (parsed.level >= 50) {
+              logger.error(`[BAILEYS:ERR] ${msg}`);
+            } else if (parsed.level >= 40) {
+              logger.warn(`[BAILEYS:WARN] ${msg}`);
+            } else if (msg.includes('error') || msg.includes('fail') || msg.includes('retry') || msg.includes('session') || msg.includes('send') || msg.includes('receipt')) {
+              logger.info(`[BAILEYS:DEBUG] ${msg}`);
+            }
+          } catch {
+            if (str.trim()) logger.debug(`[BAILEYS] ${str.trim()}`);
+          }
+        }
       }) : undefined;
 
       const authKeys = makeCacheableSignalKeyStore && pinoLogger
@@ -140,6 +156,7 @@ class WhatsAppBotEngine extends EventEmitter {
           const msgId = key.id;
           const compoundKey = `${key.remoteJid}:${key.id}`;
           const stored = this.msgRetryStore.get(compoundKey) || this.msgRetryStore.get(msgId);
+          logger.info(`[RETRY:STORE] Queried key: ${compoundKey} | Found: ${Boolean(stored)}`);
           if (stored) return stored;
           return { conversation: 'Mark Zuckerberg Assistant' };
         }
@@ -172,6 +189,8 @@ class WhatsAppBotEngine extends EventEmitter {
         }
 
         if (connection === 'close') {
+          const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
+          logger.warn(`[SYSTEM] WhatsApp connection closed. Reason: ${reason}`);
           this.qrCodeDataUrl = null;
           this.status = 'DISCONNECTED';
           this.emit('status', this.status);
@@ -186,12 +205,25 @@ class WhatsAppBotEngine extends EventEmitter {
         if (m.type !== 'notify' || !Array.isArray(m.messages)) return;
         m.messages.forEach(msg => {
           this.handleIncomingMessage(msg).catch(err => {
-            logger.error('Unhandled message error:', err.message);
+            logger.error(`[MSG:HANDLER:ERROR] Unhandled error in message handler: ${err.message}\n${err.stack}`);
           });
         });
       });
 
+      this.sock.ev.on('messages.update', (updates) => {
+        for (const update of updates) {
+          logger.info(`[MSG:UPDATE] ID: ${update.key?.id} | Remote: ${update.key?.remoteJid} | Status: ${update.update?.status || 'UNKNOWN'}`);
+        }
+      });
+
+      this.sock.ev.on('message-receipt.update', (receipts) => {
+        for (const r of receipts) {
+          logger.info(`[MSG:RECEIPT] ID: ${r.key?.id} | Remote: ${r.key?.remoteJid} | User: ${r.receipt?.userJid || 'PRIMARY'}`);
+        }
+      });
+
     } catch (err) {
+      logger.error(`[SOCKET:INIT:ERROR] Failed initializing WhatsApp socket: ${err.message}\n${err.stack}`);
       this.status = 'DISCONNECTED';
       this.emit('status', this.status);
     }
@@ -231,9 +263,13 @@ class WhatsAppBotEngine extends EventEmitter {
    * Dispatches message safely with exactly ONE send call and records sent IDs immediately.
    */
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
-    if (!this.sock) return false;
+    if (!this.sock) {
+      logger.error(`[DISPATCH:FAIL] Socket is not connected. Target: ${chatJid}`);
+      return false;
+    }
     try {
       const options = originalMsg ? { quoted: originalMsg } : {};
+      logger.info(`[DISPATCH:START] Target: ${chatJid} | isGroup: ${isGroup} | HasQuoted: ${Boolean(originalMsg)}`);
       const res = await this.sock.sendMessage(chatJid, content, options);
       if (res?.key?.id) {
         const msgId = res.key.id;
@@ -249,11 +285,16 @@ class WhatsAppBotEngine extends EventEmitter {
             this.msgRetryStore.delete(firstKey);
           }
         }
-        logger.info(`[DISPATCH] Sent ${isGroup ? 'GROUP' : 'DM'} message to ${chatJid} (ID: ${msgId})`);
+        logger.info(`[DISPATCH:SUCCESS] Sent ${isGroup ? 'GROUP' : 'DM'} to ${chatJid} | MsgID: ${msgId}`);
+      } else {
+        logger.warn(`[DISPATCH:EMPTY] sendMessage returned no message ID for ${chatJid}`);
       }
       return true;
     } catch (err) {
-      logger.error(`[DISPATCH:ERROR] Send message to ${chatJid} failed: ${err.message}`);
+      logger.error(`[DISPATCH:ERROR] Send message to ${chatJid} failed: ${err.message}\n${err.stack}`);
+      if (err.data) {
+        logger.error(`[DISPATCH:ERROR:DATA] ${JSON.stringify(err.data)}`);
+      }
       return false;
     }
   }
