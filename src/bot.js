@@ -14,15 +14,20 @@ let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVer
 
 try {
   const baileys = await import('@whiskeysockets/baileys');
-  makeWASocket = baileys.default;
-  useMultiFileAuthState = baileys.useMultiFileAuthState;
-  DisconnectReason = baileys.DisconnectReason;
-  fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
-  downloadMediaMessage = baileys.downloadMediaMessage;
+  makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket || baileys;
+  useMultiFileAuthState = baileys.useMultiFileAuthState || baileys.default?.useMultiFileAuthState;
+  DisconnectReason = baileys.DisconnectReason || baileys.default?.DisconnectReason;
+  fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || baileys.default?.fetchLatestBaileysVersion;
+  downloadMediaMessage = baileys.downloadMediaMessage || baileys.default?.downloadMediaMessage;
 
-  QRCode = (await import('qrcode')).default;
-  pino = (await import('pino')).default;
-} catch (err) {}
+  const qrMod = await import('qrcode');
+  QRCode = qrMod.default?.default || qrMod.default || qrMod;
+
+  const pinoMod = await import('pino');
+  pino = pinoMod.default?.default || pinoMod.default || pinoMod;
+} catch (err) {
+  logger.error(`[CRITICAL] Error importing Baileys or dependencies: ${err.message}`);
+}
 
 class BoundedTtlSet {
   constructor(maxSize = 2000, ttlMs = 15 * 60 * 1000) {

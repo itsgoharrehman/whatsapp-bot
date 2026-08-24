@@ -28,7 +28,7 @@ const ROOT_DIR = process.cwd();
 
 export const config = {
   port: parseInt(process.env.PORT || '8100', 10),
-  host: process.env.HOST || '0.0.0.0',
+  host: process.env.HOST || process.env.IP || '0.0.0.0',
   ownerNumber: process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.trim().replace(/[^0-9]/g, '') : '',
 
   // Groq API Keys & Models

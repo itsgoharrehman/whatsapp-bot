@@ -5,8 +5,10 @@ import { db } from '../utils/db.js';
 let GroqSDK = null;
 try {
   const mod = await import('groq-sdk');
-  GroqSDK = mod.default;
-} catch (err) {}
+  GroqSDK = mod.default?.default || mod.default || mod.Groq || mod;
+} catch (err) {
+  logger.error(`[CRITICAL] Error importing groq-sdk: ${err.message}`);
+}
 
 class AIProviderManager {
   constructor() {
