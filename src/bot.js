@@ -227,17 +227,15 @@ class WhatsAppBotEngine extends EventEmitter {
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
     if (!this.sock) return false;
     try {
-      // In WhatsApp Multi-Device, always quoting originalMsg ensures Signal participant pre-keys
-      // are properly exchanged with the recipient's phone (solves "Waiting for this message")
-      const options = originalMsg ? { quoted: originalMsg } : {};
+      // In Groups, quoting ensures Signal group keys & multi-user clarity.
+      // In DMs (especially @lid), omit quoted contextInfo so WhatsApp mobile renders the reply directly in the 1-on-1 thread.
+      const options = isGroup && originalMsg ? { quoted: originalMsg } : {};
       const res = await this.sock.sendMessage(chatJid, content, options);
       if (res?.key?.id) {
         const msgId = res.key.id;
         const compoundKey = `${chatJid}:${msgId}`;
         this.sentBotMsgIds.add(msgId);
         this.sentBotMsgIds.add(compoundKey);
-        this.processedInboundMsgIds.add(msgId);
-        this.processedInboundMsgIds.add(compoundKey);
 
         if (res.message) {
           this.msgRetryStore.set(msgId, res.message);
@@ -280,12 +278,12 @@ class WhatsAppBotEngine extends EventEmitter {
 
       if (msgTimestamp && !isNaN(msgTimestamp) && msgTimestamp > 0) {
         const nowSec = Math.floor(Date.now() / 1000);
-        // Drop any message sent before current bot engine instance started (with 10s grace period)
-        if (this.startTime && msgTimestamp < (this.startTime - 10)) {
+        // Allow generous grace period of 120s for start time to prevent dropping valid messages on restart
+        if (this.startTime && msgTimestamp < (this.startTime - 120)) {
           return;
         }
-        // Drop any message older than 180 seconds from current clock
-        if (nowSec - msgTimestamp > 180) {
+        // Drop messages older than 10 minutes (600s)
+        if (nowSec - msgTimestamp > 600) {
           return;
         }
       }
