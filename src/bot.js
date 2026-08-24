@@ -10,7 +10,7 @@ import permissionChecker from './utils/permissionChecker.js';
 import adminCommands from './commands/admin.js';
 import { skillResolver, skillLoader } from './skills/index.js';
 
-let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, QRCode, pino;
+let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, generateWAMessage, QRCode, pino;
 
 try {
   const baileys = await import('@whiskeysockets/baileys');
@@ -20,6 +20,7 @@ try {
   DisconnectReason = baileys.DisconnectReason || baileys.default?.DisconnectReason;
   fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || baileys.default?.fetchLatestBaileysVersion;
   downloadMediaMessage = baileys.downloadMediaMessage || baileys.default?.downloadMediaMessage;
+  generateWAMessage = baileys.generateWAMessage || baileys.default?.generateWAMessage;
 
   const qrMod = await import('qrcode');
   QRCode = qrMod.default?.default || qrMod.default || qrMod;
@@ -265,9 +266,28 @@ class WhatsAppBotEngine extends EventEmitter {
       return false;
     }
     try {
-      const options = originalMsg ? { quoted: originalMsg } : {};
       logger.info(`[DISPATCH:START] Target: ${chatJid} | isGroup: ${isGroup} | HasQuoted: ${Boolean(originalMsg)}`);
-      const res = await this.sock.sendMessage(chatJid, content, options);
+      
+      let res;
+      if (typeof generateWAMessage === 'function' && typeof this.sock.relayMessage === 'function') {
+        const fullMsg = await generateWAMessage(chatJid, content, {
+          userJid: this.sock.user?.id,
+          quoted: originalMsg || undefined
+        });
+        const additionalAttributes = {};
+        if (chatJid.endsWith('@lid')) {
+          additionalAttributes.addressing_mode = 'lid';
+        }
+        await this.sock.relayMessage(chatJid, fullMsg.message, {
+          messageId: fullMsg.key.id,
+          additionalAttributes
+        });
+        res = fullMsg;
+      } else {
+        const options = originalMsg ? { quoted: originalMsg } : {};
+        res = await this.sock.sendMessage(chatJid, content, options);
+      }
+
       if (res?.key?.id) {
         const msgId = res.key.id;
         const compoundKey = `${chatJid}:${msgId}`;
@@ -284,7 +304,7 @@ class WhatsAppBotEngine extends EventEmitter {
         }
         logger.info(`[DISPATCH:SUCCESS] Sent ${isGroup ? 'GROUP' : 'DM'} to ${chatJid} | MsgID: ${msgId}`);
       } else {
-        logger.warn(`[DISPATCH:EMPTY] sendMessage returned no message ID for ${chatJid}`);
+        logger.warn(`[DISPATCH:EMPTY] dispatch returned no message ID for ${chatJid}`);
       }
       return true;
     } catch (err) {
