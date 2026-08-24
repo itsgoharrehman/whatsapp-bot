@@ -316,13 +316,12 @@ class WhatsAppBotEngine extends EventEmitter {
       const isOwner = isFromMe || adminCommands.isOwner(senderJid, isFromMe, botContext);
       const senderLabel = isOwner ? 'OWNER' : 'USER';
 
-      // In DMs: if sent by me / self, ONLY proceed if it's an explicit command (starts with '/') or explicit bot mention (@mark)
-      if (!isGroup && isFromMe) {
-        const isCommand = trimmedText.startsWith('/');
-        const isMention = trimmedText.toLowerCase().includes('@mark') ||
-          trimmedText.toLowerCase().includes('@zuck') ||
-          (botPhoneNum && trimmedText.includes(`@${botPhoneNum}`));
-        if (!isCommand && !isMention) {
+      // STRICT PERSONAL CHAT (DM) RULE:
+      // Completely disable all automated AI replies in personal chats (1-on-1 DMs).
+      // Only explicit slash commands from the verified owner (/status, /pdf, /ppt, /help) are allowed in DMs.
+      if (!isGroup) {
+        const isSlashCommand = trimmedText.startsWith('/');
+        if (!isOwner || !isSlashCommand) {
           return;
         }
       }
@@ -353,7 +352,7 @@ class WhatsAppBotEngine extends EventEmitter {
         return;
       }
 
-      // Check for Specialized Skill Invocations (@mark(pdf), etc.)
+      // Check for Specialized Skill Invocations (/pdf, /ppt, /pptx, etc.)
       const resolvedSkill = skillResolver.resolve(trimmedText, { botPhoneNum });
       if (resolvedSkill.isSkill && resolvedSkill.skill) {
         if (isGroup) {
@@ -369,8 +368,9 @@ class WhatsAppBotEngine extends EventEmitter {
 
         // If skill was invoked without prompt and without quoted text, guide the user
         if (!skillPrompt.trim()) {
+          const exampleCmd = resolvedSkill.skillName === 'pptx' ? '/ppt' : `/${resolvedSkill.skillName}`;
           await this.dispatchMessage(chatJid, {
-            text: `Please specify a topic for the ${resolvedSkill.skillName.toUpperCase()} skill. Example:\n*@mark(${resolvedSkill.skillName}) Project overview and timeline*`
+            text: `*Usage:* \`${exampleCmd} <topic or title>\`\n*Example:* \`${exampleCmd} Artificial Intelligence in 2026\`\n\n_Tip: You can also quote/reply to any message with ${exampleCmd} to generate it from that message._`
           }, isGroup, m);
           return;
         }

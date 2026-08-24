@@ -60,16 +60,22 @@ export default {
   async handleCommand(commandText, senderJid, isFromMe = false, botContext = {}) {
     const trimmed = commandText.trim();
     if (!trimmed.startsWith('/')) return null;
-    if (!this.isOwner(senderJid, isFromMe, botContext)) {
-      return `*Control Panel* › *Access Denied*\n────────────────────\n• *Status* : Unauthorized\n• *Detail* : Owner verification required\n────────────────────`;
-    }
 
     const parts = trimmed.split(/\s+/);
     const cmd = parts[0].toLowerCase();
     const args = parts.slice(1);
 
+    // Bypass skills so SkillResolver handles them directly (/pdf, /ppt, /pptx, /doc, /skill)
+    if (cmd === '/pdf' || cmd === '/ppt' || cmd === '/pptx' || cmd === '/doc' || cmd === '/skill') {
+      return null;
+    }
+
+    if (!this.isOwner(senderJid, isFromMe, botContext)) {
+      return `*Control Panel* › *Access Denied*\n────────────────────\n• *Status* : Unauthorized\n• *Detail* : Owner verification required\n────────────────────`;
+    }
+
     if (cmd === '/help') {
-      return `*Control Panel* › *Help*\n────────────────────\n• */auto* ── Master switch for all auto-replies [ on | off ]\n• */chat* ── Toggle text chat reply [ on | off ]\n• */voice* ── Toggle voice message processing [ on | off ]\n• */image* ── Toggle image processing [ on | off ]\n• */status* ── System metrics & active state\n• */models* ── AI architecture & fallback tree\n• */skills* ── Loaded skills & syntax\n• */provider* ── Select provider [ groq | nvidia | auto ]\n• */rotate* ── Rotate active key [ groq | nvidia ]\n• */reset* ── Clear context or database [ chat | all ]\n• */rule* ── Dynamic rules [ add | list | rm | clear ]\n• */help* ── Display command menu\n────────────────────\n*Skill Triggers:*\n• *@mark(pdf)* <topic> ── Generate formatted PDF document\n• *@mark(pptx)* <topic> ── Generate PowerPoint presentation`;
+      return `*Control Panel* › *Help*\n────────────────────\n*Commands:*\n• */pdf* <topic> ── Generate formatted PDF document\n• */ppt* <topic> ── Generate PowerPoint presentation\n• */auto* ── Master switch for all auto-replies [ on | off ]\n• */chat* ── Toggle text chat reply [ on | off ]\n• */voice* ── Toggle voice message processing [ on | off ]\n• */image* ── Toggle image processing [ on | off ]\n• */status* ── System metrics & active state\n• */models* ── AI architecture & fallback tree\n• */skills* ── Loaded skills & syntax\n• */provider* ── Select provider [ groq | nvidia | auto ]\n• */rotate* ── Rotate active key [ groq | nvidia ]\n• */reset* ── Clear context or database [ chat | all ]\n• */rule* ── Dynamic rules [ add | list | rm | clear ]\n• */help* ── Display command menu\n────────────────────`;
     }
 
     if (cmd === '/status') {
@@ -94,10 +100,10 @@ export default {
       }
       const skillsFormatted = list.map(s => {
         const aliases = s.aliases && s.aliases.length > 0 ? ` (aliases: ${s.aliases.join(', ')})` : '';
-        return `• *${s.name.toUpperCase()}*${aliases}\n  ↳ _Usage_: \`${s.usage}\`\n  ↳ _Info_: ${s.description}`;
+        return `• *${s.name.toUpperCase()}*${aliases}\n  ↳ _Usage_: \`/${s.name} <prompt>\`\n  ↳ _Info_: ${s.description}`;
       }).join('\n\n');
 
-      return `*Control Panel* › *Skills Engine*\n────────────────────\n${skillsFormatted}\n\n*Trigger Pattern:*\n• *@mark(skill_name) <prompt>*\n────────────────────`;
+      return `*Control Panel* › *Skills Engine*\n────────────────────\n${skillsFormatted}\n\n*Quick Triggers:*\n• */pdf <topic>*\n• */ppt <topic>*\n────────────────────`;
     }
 
     if (cmd === '/provider') {

@@ -4,7 +4,7 @@ export const pptxSkill = {
   name: 'pptx',
   aliases: ['ppt', 'presentation', 'slides', 'powerpoint', 'deck'],
   description: 'Generates publication-grade, professionally designed PowerPoint (.pptx) presentations with native charts, tables, KPIs, diagrams, and cards from prompts or quoted text',
-  usage: '@mark(pptx) <your prompt or topic>',
+  usage: '/ppt <your prompt or topic>',
 
   /**
    * Executes the PowerPoint generation skill.

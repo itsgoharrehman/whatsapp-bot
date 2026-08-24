@@ -4,7 +4,7 @@ export const pdfSkill = {
   name: 'pdf',
   aliases: ['document', 'doc', 'report', 'guide'],
   description: 'Generates publication-grade, professionally designed PDF documents from prompts or quoted text',
-  usage: '@mark(pdf) <your prompt or topic>',
+  usage: '/pdf <your prompt or topic>',
 
   /**
    * Executes the PDF generation skill.
