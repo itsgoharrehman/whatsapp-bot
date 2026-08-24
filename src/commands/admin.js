@@ -41,7 +41,7 @@ export default {
     }
 
     const isOwnerUser = this.isOwner(senderJid, isFromMe, botContext);
-    const senderNum = senderJid.split('@')[0].split(':')[0];
+    const senderNum = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
     // ==========================================
     // PUBLIC USER COMMANDS
@@ -50,24 +50,31 @@ export default {
       return `*Artifact Generation Engine* › *Help*
 ────────────────────
 *Document Generation:*
-• */pdf* <topic> ── Generate a formatted multi-page PDF document
+• */pdf* <topic> ── Generate a formatted PDF document
 • */ppt* <topic> ── Generate an executive PowerPoint (.pptx) deck
 
-*Quota & Balance:*
-• */usage* (or */limit*) ── Check your remaining daily generations
+*Quota & Status:*
+• */usage* ── Check your remaining daily generations balance
+
+*Admin Management (Owner):*
+• */vip* <phone> ── Grant unlimited generations to a VIP user
+• */unvip* <phone> ── Revoke VIP status (or */limit <phone>*)
+• */vips* ── List all active VIP users
+• */status* ── View system uptime & generation metrics
+• */keys* ── Live multi-key health matrix
 
 *Pro Tips:*
-• You can reply/quote any message and type */pdf* or */ppt* to convert it into a document!
-• Standard users receive up to 10 generations per day (max 4 pages per PDF / 10 slides per PPT).
+• Quote any message and type */pdf* or */ppt* to convert it!
+• Standard users get 10 generations per day.
 ────────────────────`;
     }
 
-    if (cmd === '/usage' || cmd === '/limit') {
+    if (cmd === '/usage' || cmd === '/quota' || cmd === '/balance') {
       const quota = db.checkUserQuota(senderJid, isOwnerUser);
       return `*Artifact Engine* › *Daily Quota*
 ────────────────────
 • *User* : ${senderNum}
-• *Status* : ${quota.isUnlimited ? '🌟 VIP / Owner (Unlimited)' : 'Standard User'}
+• *Role* : ${quota.role}
 • *Used Today* : ${quota.isUnlimited ? 'N/A' : `${quota.used} / ${quota.limit}`}
 • *Remaining* : ${quota.isUnlimited ? '∞ Unlimited' : `${quota.remaining} generations`}
 • *Reset In* : ${quota.isUnlimited ? 'N/A' : `~${quota.resetInHours} hours (00:00 UTC)`}
@@ -81,7 +88,54 @@ export default {
     // OWNER / ADMIN ONLY COMMANDS
     // ==========================================
     if (!isOwnerUser) {
-      return `*Artifact Engine* › *Access Denied*\n────────────────────\n• *Status* : Unauthorized\n• *Detail* : Owner verification required\n• Type */help* for user commands\n────────────────────`;
+      if (cmd === '/vip' || cmd === '/unvip' || cmd === '/unlimit' || cmd === '/limit' || cmd === '/status' || cmd === '/stats' || cmd === '/keys' || cmd === '/reset') {
+        return `*Artifact Engine* › *Access Denied*\n────────────────────\n• *Status* : Unauthorized\n• *Detail* : This command is restricted to the bot owner.\n• Type */help* for public commands\n────────────────────`;
+      }
+      return null;
+    }
+
+    // --- VIP Grant Command ---
+    if (cmd === '/vip' || cmd === '/unlimit') {
+      const targetPhone = (args[0] || '').replace(/[^0-9]/g, '');
+      if (!targetPhone) {
+        return `*Artifact Engine* › *Grant VIP*\n────────────────────\n• *Usage* : /vip <phone_number>\n• *Example* : /vip 923238522260\n────────────────────`;
+      }
+      db.setVip(targetPhone, true);
+      return `*Artifact Engine* › *VIP Granted*\n────────────────────\n• *User* : ${targetPhone}\n• *Role* : 🌟 VIP User\n• *Quota* : Unlimited (∞)\n• *Status* : Active\n────────────────────`;
+    }
+
+    // --- VIP Revoke Command ---
+    if (cmd === '/unvip' || (cmd === '/limit' && args.length > 0)) {
+      const targetPhone = (args[0] || '').replace(/[^0-9]/g, '');
+      if (!targetPhone) {
+        return `*Artifact Engine* › *Revoke VIP*\n────────────────────\n• *Usage* : /unvip <phone_number>\n• *Example* : /unvip 923238522260\n────────────────────`;
+      }
+      db.setVip(targetPhone, false);
+      return `*Artifact Engine* › *VIP Revoked*\n────────────────────\n• *User* : ${targetPhone}\n• *Role* : Standard User\n• *Quota* : Standard (10/day)\n• *Status* : Updated\n────────────────────`;
+    }
+
+    // --- List VIPs ---
+    if (cmd === '/vips') {
+      const vips = db.getVips();
+      const list = vips.length > 0
+        ? vips.map((v, i) => `• ${i + 1}. *${v}* (Unlimited)`).join('\n')
+        : '_No VIP users currently registered._';
+
+      return `*Artifact Engine* › *VIP Whitelist*
+────────────────────
+${list}
+────────────────────
+• Use */vip <phone>* to add a user
+• Use */unvip <phone>* to remove a user`;
+    }
+
+    if (cmd === '/limit' && args.length === 0) {
+      return `*Artifact Engine* › *Limit Command*
+────────────────────
+• */usage* ── Check your own balance
+• */vip <phone>* ── Grant unlimited VIP access
+• */unvip <phone>* (or */limit <phone>*) ── Revoke VIP access
+────────────────────`;
     }
 
     if (cmd === '/status') {
@@ -101,7 +155,8 @@ export default {
 *TODAY'S PRODUCTION*
 • *Generations Today* : ${analytics.totalGenerationsToday || 0}
 • *Active Users Today* : ${analytics.activeUsersToday || 0}
-• *Avg Generation Speed* : ${analytics.avgLatencyMs ? `${(analytics.avgLatencyMs / 1000).toFixed(1)}s` : 'N/A'}
+• *VIP Users* : ${analytics.vipCount || 0}
+• *Avg Speed* : ${analytics.avgLatencyMs ? `${(analytics.avgLatencyMs / 1000).toFixed(1)}s` : 'N/A'}
 
 *TOTAL PRODUCTION (ALL-TIME)*
 • *PDF Documents* : ${analytics.totalPdfsGenerated || 0}
@@ -143,21 +198,6 @@ ${keysFormatted}
 *NVIDIA POOL*
 • Configured Keys: ${aiStatus.totalNvidiaKeys}
 ────────────────────`;
-    }
-
-    if (cmd === '/unlimit' || cmd === '/vip') {
-      const targetPhone = (args[0] || '').replace(/[^0-9]/g, '');
-      if (!targetPhone) {
-        return `*Artifact Engine* › *VIP Management*\n────────────────────\n• *Usage* : /unlimit <phone_number>\n• *Example* : /unlimit 923001234567\n────────────────────`;
-      }
-      db.setVip(targetPhone, true);
-      return `*Artifact Engine* › *VIP Granted*\n────────────────────\n• *User* : ${targetPhone}\n• *Quota* : UNLIMITED (∞)\n• *Status* : Active\n────────────────────`;
-    }
-
-    if (cmd === '/limit' && args.length > 0) {
-      const targetPhone = (args[0] || '').replace(/[^0-9]/g, '');
-      db.setVip(targetPhone, false);
-      return `*Artifact Engine* › *VIP Revoked*\n────────────────────\n• *User* : ${targetPhone}\n• *Quota* : Standard (10/day)\n────────────────────`;
     }
 
     if (cmd === '/reset') {

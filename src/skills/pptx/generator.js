@@ -22,7 +22,7 @@ export class PPTXGenerator {
     }
 
     // Render native PowerPoint presentation via PPTXRenderer
-    const renderResult = await PPTXRenderer.render(presJson);
+    const renderedBuffer = await PPTXRenderer.render(presJson);
     const totalLatency = Date.now() - startTime;
 
     const safeTitle = (presJson.title || 'Presentation')
@@ -30,13 +30,17 @@ export class PPTXGenerator {
       .replace(/_+/g, '_')
       .slice(0, 50);
 
+    const validBuffer = Buffer.isBuffer(renderedBuffer) ? renderedBuffer : (renderedBuffer?.buffer || Buffer.from(renderedBuffer));
+
+    logger.info(`[PPTX:SUCCESS] Generated "${presJson.title}" buffer size: ${validBuffer.length} bytes`);
+
     return {
-      buffer: renderResult.buffer,
+      buffer: validBuffer,
       filename: `${safeTitle}.pptx`,
       title: presJson.title,
       caption: `📊 Generated Presentation: *${presJson.title}*\n⚡ _Synthesized in ${(totalLatency / 1000).toFixed(1)}s across parallel keys [${result.keyUsed}]_`,
       mimetype: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      slideCount: renderResult.slideCount || presJson.slides?.length || 1,
+      slideCount: presJson.slides?.length || 1,
       latencyMs: totalLatency,
       modelUsed: result.modelUsed,
       keyUsed: result.keyUsed

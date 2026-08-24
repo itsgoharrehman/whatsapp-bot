@@ -22,7 +22,7 @@ export class PDFGenerator {
     }
 
     // Render the vector PDF via PDFRenderer
-    const renderResult = await PDFRenderer.render(docJson);
+    const renderedBuffer = await PDFRenderer.render(docJson);
     const totalLatency = Date.now() - startTime;
 
     const safeTitle = (docJson.title || 'Document')
@@ -30,12 +30,16 @@ export class PDFGenerator {
       .replace(/_+/g, '_')
       .slice(0, 50);
 
+    const validBuffer = Buffer.isBuffer(renderedBuffer) ? renderedBuffer : (renderedBuffer?.buffer || Buffer.from(renderedBuffer));
+
+    logger.info(`[PDF:SUCCESS] Generated "${docJson.title}" buffer size: ${validBuffer.length} bytes`);
+
     return {
-      buffer: renderResult.buffer,
+      buffer: validBuffer,
       filename: `${safeTitle}.pdf`,
       title: docJson.title,
       caption: `📄 Generated Document: *${docJson.title}*\n⚡ _Synthesized in ${(totalLatency / 1000).toFixed(1)}s across parallel keys [${result.keyUsed}]_`,
-      pageCount: renderResult.pageCount || docJson.sections?.length || 1,
+      pageCount: docJson.sections?.length || 1,
       latencyMs: totalLatency,
       modelUsed: result.modelUsed,
       keyUsed: result.keyUsed

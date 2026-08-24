@@ -98,9 +98,11 @@ class ArtifactDatabase {
   }
 
   isVip(jidOrPhone) {
+    if (!jidOrPhone) return false;
     const num = this.normalizeJid(jidOrPhone);
     if (!num) return false;
-    return this.data.vips.includes(num);
+    // Check direct normalized number match or partial matches
+    return this.data.vips.some(v => v === num || num.endsWith(v) || v.endsWith(num));
   }
 
   setVip(jidOrPhone, isVip = true) {
@@ -109,21 +111,38 @@ class ArtifactDatabase {
     if (isVip && !this.data.vips.includes(num)) {
       this.data.vips.push(num);
     } else if (!isVip) {
-      this.data.vips = this.data.vips.filter(v => v !== num);
+      this.data.vips = this.data.vips.filter(v => v !== num && !num.endsWith(v) && !v.endsWith(num));
     }
     this.save();
     return true;
   }
 
+  getVips() {
+    return [...this.data.vips];
+  }
+
   /**
-   * Checks daily generation quota for a user.
+   * Checks daily generation quota and exact role for a user.
    */
   checkUserQuota(userJid, isOwner = false) {
     const userPhone = this.normalizeJid(userJid);
-    const isVipUser = isOwner || this.isVip(userPhone);
+    const isVipUser = this.isVip(userPhone) || this.isVip(userJid);
+
+    if (isOwner) {
+      return {
+        role: 'OWNER',
+        allowed: true,
+        isUnlimited: true,
+        remaining: Infinity,
+        limit: Infinity,
+        used: 0,
+        resetInHours: 0
+      };
+    }
 
     if (isVipUser) {
       return {
+        role: 'VIP',
         allowed: true,
         isUnlimited: true,
         remaining: Infinity,
@@ -153,6 +172,7 @@ class ArtifactDatabase {
     const allowed = used < limit;
 
     return {
+      role: 'STANDARD',
       allowed,
       isUnlimited: false,
       remaining,
@@ -257,6 +277,7 @@ class ArtifactDatabase {
     return {
       ...this.data.analytics,
       vipCount: this.data.vips.length,
+      vips: this.data.vips,
       activeUsersToday: Object.keys(this.data.quotas).filter(k => this.data.quotas[k].date === getTodayString()).length,
       recentGenerations: this.data.recentGenerations.slice(0, 10)
     };
