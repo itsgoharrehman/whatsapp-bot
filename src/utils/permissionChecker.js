@@ -1,5 +1,4 @@
 import { config } from '../config.js';
-import { logger } from './logger.js';
 
 export default {
   unwrapMessage(rawMessage) {
@@ -13,27 +12,6 @@ export default {
     if (message.editedMessage) message = message.editedMessage.message?.protocolMessage?.editedMessage || message;
 
     return message;
-  },
-
-  detectMediaType(unwrappedMessage) {
-    if (!unwrappedMessage) return 'text';
-    if (unwrappedMessage.imageMessage) return 'image';
-    if (unwrappedMessage.audioMessage) return 'audio';
-    if (unwrappedMessage.videoMessage) return 'video';
-    if (unwrappedMessage.documentMessage) return 'document';
-    if (unwrappedMessage.stickerMessage) return 'sticker';
-    return 'text';
-  },
-
-  hasMedia(unwrappedMessage) {
-    if (!unwrappedMessage) return false;
-    return Boolean(
-      unwrappedMessage.imageMessage ||
-      unwrappedMessage.audioMessage ||
-      unwrappedMessage.videoMessage ||
-      unwrappedMessage.documentMessage ||
-      unwrappedMessage.stickerMessage
-    );
   },
 
   extractMessageText(unwrappedMessage) {
@@ -52,7 +30,7 @@ export default {
 
   normalizeJid(jid) {
     if (!jid || typeof jid !== 'string') return '';
-    return jid.split('@')[0].split(':')[0];
+    return jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
   },
 
   isBroadcastOrNewsletter(jid) {
@@ -78,79 +56,7 @@ export default {
     return this.extractMessageText(quotedUnwrapped);
   },
 
-  isBotMentionedInGroup(rawMessage, botJid, botLid, messageTextArg, senderJidArg = null, sentBotMsgIds = null) {
-    let messageText = typeof messageTextArg === 'string' ? messageTextArg : '';
-
-    const unwrapped = this.unwrapMessage(rawMessage);
-    if (!unwrapped) return false;
-
-    const botPhoneNum = this.normalizeJid(botJid) || this.normalizeJid(config.ownerNumber);
-    const botLidNum = this.normalizeJid(botLid);
-    const senderNum = this.normalizeJid(senderJidArg || rawMessage.key?.participant || rawMessage.key?.remoteJid);
-
-    // ZERO SELF-TRIGGER: The bot must never consider its own dispatched messages as mentions
-    if (sentBotMsgIds && rawMessage.key?.id && sentBotMsgIds.has(rawMessage.key.id)) return false;
-
-    // 1. Check text-based tags / mentions (@mark, @mark zuckerberg, @zuck, @<botNumber>)
-    if (messageText) {
-      const cleanText = messageText.toLowerCase().trim();
-      if (
-        cleanText.includes('@mark') ||
-        cleanText.includes('@mark zuckerberg') ||
-        cleanText.includes('@zuck') ||
-        /^\bmark\b/i.test(cleanText) ||
-        /^\bzuck\b/i.test(cleanText) ||
-        (botPhoneNum && cleanText.includes(`@${botPhoneNum}`)) ||
-        (botLidNum && cleanText.includes(`@${botLidNum}`))
-      ) {
-        return true;
-      }
-    }
-
-    const contextInfo =
-      unwrapped.extendedTextMessage?.contextInfo ||
-      unwrapped.imageMessage?.contextInfo ||
-      unwrapped.videoMessage?.contextInfo ||
-      unwrapped.audioMessage?.contextInfo ||
-      unwrapped.documentMessage?.contextInfo;
-
-    if (contextInfo) {
-      // 2. Check if bot is explicitly mentioned in mentionedJid list
-      if (Array.isArray(contextInfo.mentionedJid) && contextInfo.mentionedJid.length > 0) {
-        const isMentioned = contextInfo.mentionedJid.some(jid => {
-          if (!jid) return false;
-          if (botJid && jid === botJid) return true;
-          if (botLid && jid === botLid) return true;
-          const num = this.normalizeJid(jid);
-          if (botPhoneNum && num === botPhoneNum) return true;
-          if (botLidNum && num === botLidNum) return true;
-          return false;
-        });
-        if (isMentioned) return true;
-      }
-
-      // 3. Check if this is a quote/reply specifically to the bot's message
-      if (contextInfo.participant) {
-        const quoted = contextInfo.participant;
-        const quotedNum = this.normalizeJid(quoted);
-
-        // If the sender is quoting their OWN message, do NOT treat it as a quote to the bot
-        const isSelfQuote = Boolean(senderNum && quotedNum && senderNum === quotedNum);
-
-        if (!isSelfQuote) {
-          if (botJid && quoted === botJid) return true;
-          if (botLid && quoted === botLid) return true;
-          if (botPhoneNum && quotedNum === botPhoneNum) return true;
-          if (botLidNum && quotedNum === botLidNum) return true;
-          if (sentBotMsgIds && contextInfo.stanzaId && sentBotMsgIds.has(contextInfo.stanzaId)) return true;
-        }
-      }
-    }
-
-    return false;
-  },
-
-  async hasGroupWritePermission(sock, groupJid, botJid) {
-    return true; // Safe no-op
+  async hasGroupWritePermission() {
+    return true;
   }
 };

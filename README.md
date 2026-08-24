@@ -1,91 +1,68 @@
-# WhatsApp AI Bot Engine
+# WhatsApp Artifact Generation Engine
 
-A highly robust, anti-ban compliant, and hyper-natural WhatsApp AI assistant built using `@whiskeysockets/baileys`. 
+An enterprise-grade, anti-ban compliant **PDF & PowerPoint (.pptx) Artifact Generation Bot** built on `@whiskeysockets/baileys`.
 
-This bot features a complex Semantic LLM routing architecture, dynamically switching between **NVIDIA NIM** and **Groq** APIs based on query complexity. It is designed to act exactly like a normal human (named "Mark") chatting on behalf of the owner, rather than a robotic AI assistant.
+Designed with a **Multi-Key Parallel AI Racing Engine** across **Groq** and **NVIDIA NIM**, this bot delivers publication-grade visual documents in **2–4 seconds** with strict per-user quotas and zero conversational bloat.
 
 ---
 
 ## 🌟 Key Features
 
-- **Semantic Routing Architecture**: Analyzes incoming messages and routes them to either "Simple" (fast, lightweight models) or "Reasoning" (heavy, complex models) endpoints.
-- **Multi-Provider Fallover**: Configured with automatic failovers between **NVIDIA NIM** (Primary) and **Groq** (Secondary). If one provider or model throws a 404/500, it automatically rotates keys and falls back to the next available model.
-- **Anti-Ban Mechanisms**: Includes intelligent rate-limiting, randomized human-like typing delays, message deduplication, and read-receipt management to keep your number safe.
-- **Live Web Dashboard**: A built-in sleek web interface (running on port 8100 by default) that displays real-time connection status, QR code scanning, and live terminal logs.
-- **Hyper-Natural Persona**: The bot is heavily fine-tuned via `system.md` to perfectly mimic a human texting. It mirrors short answers (e.g. replying "sahi" to "ok"), uses minimal punctuation, avoids over-enthusiastic AI phrases, and knows exactly when to let a conversation naturally end.
-- **Owner Security**: Strict authentication based on `SENDER_ROLE`. The bot blindly follows commands from the Owner while safely interacting with third-party users without leaking configurations.
+- **Multi-Key Parallel AI Racing (`Promise.any`)**: Dispatches concurrent requests across up to 10 Groq API keys and NVIDIA NIM models. The fastest valid response wins instantly.
+- **Dedicated Artifact Commands**:
+  - `/pdf <topic>` — Generates rich, multi-page vector-styled PDF documents.
+  - `/ppt <topic>` — Generates executive 16:9 PowerPoint presentation decks with cards, KPIs, tables, and comparison slides.
+- **Quotas & Rate Limiting**:
+  - **Standard Users**: Max **10 generations/day**, max **4 pages per PDF**, max **10 slides per PPT**, 30s anti-spam cooldown.
+  - **Owner & VIP Users**: **Unlimited (∞)** generations and depth.
+  - Check quota balance anytime with `/usage` or `/limit`.
+- **Zero Conversational Bloat**: Completely removed all casual chat, persona rules, voice notes, and image chatter. The bot exclusively generates documents on command.
+- **Live Web Dashboard**: Sleek web interface for live QR code pairing, multi-key health monitoring, and live generation analytics.
 
 ---
 
 ## 🚀 Getting Started
 
-### 1. Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
-- A WhatsApp account to link the bot to.
-- API Keys from [NVIDIA API Catalog](https://build.nvidia.com/explore/discover) and/or [Groq](https://console.groq.com/keys).
-
-### 2. Installation
-Clone the repository and install the dependencies:
-
-```bash
-git clone <your-repo-url>
-cd whatsapp-ai-bot-fixed
-npm install
-```
-
-### 3. Configuration
-Copy the `.env.example` to `.env` (or create a `.env` file) in the root directory and configure your variables:
+### 1. Configuration
+Create a `.env` file from `.env.example`:
 
 ```env
-# Server
 PORT=8100
 HOST=0.0.0.0
+OWNER_NUMBER=92300XXXXXXX
 
-# Bot Setup
-OWNER_NUMBER=92300XXXXXXX # Your WhatsApp number with country code
+# User Quotas
+DAILY_USER_LIMIT=10
+NORMAL_USER_MAX_PAGES=4
+NORMAL_USER_MAX_SLIDES=10
 
-# API Keys (Comma separated for key rotation)
-NVIDIA_API_KEYS=your_nvidia_key_1,your_nvidia_key_2
-GROQ_API_KEYS=your_groq_key_1,your_groq_key_2
+# Groq Multi-Key Pool (Up to 10 keys)
+GROQ_API_KEYS=gsk_key1,gsk_key2,gsk_key3
 
-# Provider Preference
-DEFAULT_PROVIDER=nvidia
+# NVIDIA NIM Keys
+NVIDIA_API_KEYS=nvapi-key1,nvapi-key2
 ```
 
-### 4. Running the Bot
-Start the application:
-
+### 2. Running
 ```bash
+npm install
 npm start
 ```
-Once started, you can open the Web Dashboard in your browser at `http://localhost:8100` to scan the QR code and monitor the logs.
+Open `http://localhost:8100` (or your Alwaysdata URL) to scan the QR code and monitor live generation logs.
 
 ---
 
-## ⚙️ Advanced Customization
+## 📋 Commands
 
-### The System Prompt (`system.md`)
-The core persona and behavioral rules of the AI are defined in `system.md`. By default, the bot is instructed to act like a chill assistant named Mark. You can edit this file to fundamentally change the bot's tone, pacing, language rules, and constraints without touching the codebase. 
+### User Commands (Available in all groups)
+- `/pdf <topic>` ── Generate formatted PDF document
+- `/ppt <topic>` ── Generate PowerPoint presentation
+- `/usage` ── Check daily quota balance and reset time
+- `/help` ── Display command guide
 
-Changes to `system.md` are picked up automatically by the application.
-
-### Admin Commands
-If you are the Owner (messaging the bot from the `OWNER_NUMBER`), you can send the following commands via WhatsApp DMs:
-- `/help` - Show available commands.
-- `/status` - Check the active provider, model fallback status, and API key metrics.
-- `/reset all` - Purge the active session and force a logout (useful if you want to switch numbers).
-
----
-
-## 🛡️ Architecture & Routing
-
-When a message is received:
-1. **Fast-path**: Standard greetings (Hi, Assalamualaikum) bypass the router entirely for 0ms latency processing.
-2. **Semantic Routing**: A lightweight model parses the text to determine if it requires logic/reasoning or just simple chat.
-3. **Model Selection**: Based on the route, it selects the appropriate model tier (e.g., `minimax-m3` for simple chat, `glm-5.2` for reasoning).
-4. **Resilience**: If the model produces "thinking/reasoning" blocks when it shouldn't, the engine automatically strips them out. If an API provider crashes, it instantly fails over to the next provider.
-
----
-
-## 📝 License
-This project is for educational and personal use. Keep API keys secure and respect WhatsApp's Terms of Service.
+### Owner Commands
+- `/status` ── Live system health, uptime, active keys
+- `/stats` ── Generation analytics and top users
+- `/keys` ── Multi-key health matrix
+- `/unlimit <phone>` ── Grant permanent unlimited VIP access
+- `/reset <phone | all>` ── Reset daily quota

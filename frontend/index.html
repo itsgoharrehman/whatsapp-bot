@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Control Panel</title>
+  <title>Artifact Engine Dashboard</title>
   <link rel="stylesheet" href="style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,7 +16,7 @@
     <header class="topbar auth-topbar">
       <div class="topbar-inner">
         <div class="identity">
-          <h1 id="authBrand" class="brand">Control Panel</h1>
+          <h1 id="authBrand" class="brand">Artifact Engine</h1>
         </div>
         <div id="authStatus" class="status disconnected" role="status" aria-live="polite">
           <span class="status-marker" aria-hidden="true"></span>
@@ -28,23 +28,23 @@
     <main class="page">
       <div class="auth-layout">
         <section class="auth-instructions" aria-labelledby="setupHeading">
-          <h2 id="setupHeading" class="section-heading">Link WhatsApp Device</h2>
+          <h2 id="setupHeading" class="section-heading">Link WhatsApp Bot</h2>
           <ol class="instructions">
             <li>
-              <span class="instruction-title">Start the service</span>
-              <span class="instruction-copy">Select Start or New QR to generate a secure pairing QR code.</span>
+              <span class="instruction-title">Start the engine</span>
+              <span class="instruction-copy">Select Start or New QR to generate a pairing QR code.</span>
             </li>
             <li>
               <span class="instruction-title">Open Linked Devices</span>
               <span class="instruction-copy">On your phone, open WhatsApp &gt; Settings &gt; Linked Devices.</span>
             </li>
             <li>
-              <span class="instruction-title">Scan the QR code</span>
-              <span class="instruction-copy">Tap "Link a Device" and scan the pairing code displayed here.</span>
+              <span class="instruction-title">Scan the pairing code</span>
+              <span class="instruction-copy">Tap "Link a Device" and scan the QR code displayed on this dashboard.</span>
             </li>
             <li>
-              <span class="instruction-title">Automated synchronization</span>
-              <span class="instruction-copy">Once authenticated, the console automatically switches to live operational mode.</span>
+              <span class="instruction-title">Artifact Generation Active</span>
+              <span class="instruction-copy">Once linked, the bot will automatically generate PDF and PowerPoint documents on command.</span>
             </li>
           </ol>
           <div class="auth-actions" aria-label="Session controls">
@@ -89,7 +89,7 @@
     <header class="topbar dashboard-topbar">
       <div class="topbar-inner">
         <div class="identity">
-          <h1 id="dashboardBrand" class="brand">Control Panel</h1>
+          <h1 id="dashboardBrand" class="brand">Artifact Engine</h1>
         </div>
         <div id="dashboardStatus" class="status connected" role="status">
           <span class="status-marker" aria-hidden="true"></span>
@@ -99,26 +99,30 @@
     </header>
 
     <main class="page dashboard-page">
-      <dl class="metrics" aria-label="Service metrics">
+      <dl class="metrics" aria-label="Artifact metrics">
         <div class="metric">
           <dt>Operating Mode</dt>
-          <dd id="operatingMode">Group &amp; Personal</dd>
+          <dd id="operatingMode">Parallel Artifacts Engine</dd>
         </div>
         <div class="metric">
-          <dt>Auto-Reply State</dt>
-          <dd id="autoReplyState">--</dd>
+          <dt>Total PDFs Generated</dt>
+          <dd id="totalPdfs">0</dd>
         </div>
         <div class="metric">
-          <dt>Active AI Key Index</dt>
-          <dd id="activeAiKey">--</dd>
+          <dt>Total PPTs Generated</dt>
+          <dd id="totalPpts">0</dd>
         </div>
         <div class="metric">
-          <dt>Total Messages Processed</dt>
-          <dd id="totalMessages">0</dd>
+          <dt>Generations Today</dt>
+          <dd id="todayGenerations">0</dd>
         </div>
         <div class="metric">
-          <dt>Total AI Replies Sent</dt>
-          <dd id="totalReplies">0</dd>
+          <dt>Avg Generation Speed</dt>
+          <dd id="avgSpeed">--</dd>
+        </div>
+        <div class="metric">
+          <dt>Multi-Key AI Pool</dt>
+          <dd id="keyPoolStatus">--</dd>
         </div>
       </dl>
 
@@ -131,15 +135,15 @@
               <button id="dashboardNewSessionBtn" type="button">Reset Session</button>
             </div>
             <div class="session-confirmation">
-              <p class="session-confirmation-title" id="sessionTitle">Active Session Authenticated</p>
-              <p class="session-confirmation-copy" id="sessionSubtitle">WhatsApp socket connected. QR code hidden.</p>
+              <p class="session-confirmation-title" id="sessionTitle">Artifact Engine Online</p>
+              <p class="session-confirmation-copy" id="sessionSubtitle">Ready to synthesize /pdf and /ppt requests.</p>
             </div>
           </div>
         </aside>
 
         <section class="terminal-panel" aria-labelledby="terminalHeading">
           <header class="terminal-header">
-            <h2 id="terminalHeading" class="terminal-title">Live Event Terminal Stream</h2>
+            <h2 id="terminalHeading" class="terminal-title">Live Production Log</h2>
             <div class="terminal-tools">
               <label class="checkbox-label" for="autoScroll">
                 <input id="autoScroll" type="checkbox" checked>

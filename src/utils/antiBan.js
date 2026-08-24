@@ -1,33 +1,23 @@
 import { config } from '../config.js';
 import { logger } from './logger.js';
-import { db } from './db.js';
 
 class AntiBanManager {
   constructor() {
-    this.replyTimestamps = new Map();
+    this.lastRequestTimes = new Map();
   }
 
   checkRateLimit(jid) {
     const now = Date.now();
-    const windowMs = 60 * 1000;
-    const maxAllowed = config.rateLimitMaxPerMinute;
+    const cooldownMs = config.antiSpamCooldownMs || 30000;
 
-    if (!this.replyTimestamps.has(jid)) {
+    if (!this.lastRequestTimes.has(jid)) {
       return true;
     }
 
-    const timestamps = this.replyTimestamps.get(jid) || [];
-    const recentTimestamps = timestamps.filter(ts => (now - ts) < windowMs);
-
-    if (recentTimestamps.length === 0) {
-      this.replyTimestamps.delete(jid);
-    } else {
-      this.replyTimestamps.set(jid, recentTimestamps);
-    }
-
-    if (recentTimestamps.length >= maxAllowed) {
-      logger.warn(`Anti-Ban Rate Limit triggered for ${jid}. (${recentTimestamps.length}/${maxAllowed} msgs in last min)`);
-      db.incrementMetric('rateLimitedCount');
+    const lastTime = this.lastRequestTimes.get(jid) || 0;
+    if (now - lastTime < cooldownMs) {
+      const waitSeconds = Math.ceil((cooldownMs - (now - lastTime)) / 1000);
+      logger.warn(`Rate limit active for ${jid}. Must wait ${waitSeconds}s.`);
       return false;
     }
 
@@ -35,42 +25,19 @@ class AntiBanManager {
   }
 
   recordReply(jid) {
-    const now = Date.now();
-    const windowMs = 60 * 1000;
-
-    let timestamps = this.replyTimestamps.get(jid) || [];
-    timestamps = timestamps.filter(ts => (now - ts) < windowMs);
-    timestamps.push(now);
-    this.replyTimestamps.set(jid, timestamps);
-    db.incrementMetric('totalRepliesSent');
+    this.lastRequestTimes.set(jid, Date.now());
   }
 
   /**
-   * Smooth presence sequence:
-   * 1. Brief silent pause (2 seconds)
-   * 2. Active typing animation (3-5 seconds)
+   * Applies realistic typing indicator while parallel synthesis runs.
    */
   async applyHumanDelay(sock, jid) {
-    const totalMinMs = config.antiBanMinDelayMs || 5000;
-    const totalMaxMs = config.antiBanMaxDelayMs || 8000;
-    const totalDelay = Math.floor(Math.random() * (totalMaxMs - totalMinMs + 1)) + totalMinMs;
-
-    // Phase 1: Silent thinking phase (2 seconds)
-    const silentMs = 2000;
-    const typingMs = Math.max(totalDelay - silentMs, 2000);
-
-    logger.info(`[ANTI-BAN] Chat: ${jid} | Sequence: ${silentMs}ms pause -> ${typingMs}ms typing simulation`);
-
-    await new Promise(resolve => setTimeout(resolve, silentMs));
-
-    // Phase 2: Typing animation phase
     try {
       if (sock && typeof sock.sendPresenceUpdate === 'function') {
         await sock.sendPresenceUpdate('composing', jid);
       }
     } catch (err) {}
-
-    await new Promise(resolve => setTimeout(resolve, typingMs));
+    await new Promise(resolve => setTimeout(resolve, 1500));
   }
 }
 

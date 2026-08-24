@@ -66,7 +66,7 @@ class BoundedTtlSet {
   }
 }
 
-class WhatsAppBotEngine extends EventEmitter {
+class WhatsAppArtifactEngine extends EventEmitter {
   constructor() {
     super();
     this.sock = null;
@@ -97,7 +97,6 @@ class WhatsAppBotEngine extends EventEmitter {
       await this.resetSession();
     }
 
-    // Clean up existing socket connection before starting a new one
     if (this.sock) {
       try { await this.sock.end(); } catch (err) {}
       this.sock = null;
@@ -115,13 +114,13 @@ class WhatsAppBotEngine extends EventEmitter {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ['Mark Zuckerberg', 'Chrome', '1.0.0']
+        browser: ['Artifact Engine', 'Chrome', '1.0.0']
       });
 
       this.sock.ev.on('creds.update', saveCreds);
 
       this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, qr } = update;
 
         if (qr && this.status !== 'CONNECTED') {
           this.status = 'QR_READY';
@@ -140,7 +139,7 @@ class WhatsAppBotEngine extends EventEmitter {
           }
           this.botJid = this.sock.user?.id || null;
           this.botLid = this.sock.user?.lid || this.sock.authState?.creds?.me?.lid || null;
-          logger.info(`[SYSTEM] WhatsApp Bot Connected successfully! Logged in JID: ${this.botJid} (LID: ${this.botLid})`);
+          logger.info(`[SYSTEM] Artifact Bot Connected! JID: ${this.botJid} (LID: ${this.botLid})`);
           this.emit('status', this.status);
         }
 
@@ -186,7 +185,7 @@ class WhatsAppBotEngine extends EventEmitter {
   }
 
   async resetSession() {
-    logger.info('Resetting session & purging local credentials directory...');
+    logger.info('Resetting session & purging credentials directory...');
     await this.stop();
     try {
       if (fs.existsSync(config.sessionDir)) {
@@ -200,9 +199,6 @@ class WhatsAppBotEngine extends EventEmitter {
     this.emit('status', this.status);
   }
 
-  /**
-   * Dispatches message safely with exactly ONE send call and records sent IDs immediately.
-   */
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
     if (!this.sock) return false;
     try {
@@ -232,285 +228,135 @@ class WhatsAppBotEngine extends EventEmitter {
       if (!msgId || !chatJid) return;
       if (permissionChecker.isBroadcastOrNewsletter(chatJid)) return;
 
-      // 1. Message Timestamp & Stale Message / Sync Catch-up Filter
+      // Drop stale messages (> 180s or before bot boot)
       const rawTs = m.messageTimestamp;
-      const msgTimestamp = typeof rawTs === 'object' && rawTs !== null
-        ? (rawTs.low || Number(rawTs))
-        : Number(rawTs);
-
+      const msgTimestamp = typeof rawTs === 'object' && rawTs !== null ? (rawTs.low || Number(rawTs)) : Number(rawTs);
       if (msgTimestamp && !isNaN(msgTimestamp) && msgTimestamp > 0) {
         const nowSec = Math.floor(Date.now() / 1000);
-        // Drop any message sent before current bot engine instance started (with 10s grace period)
-        if (this.startTime && msgTimestamp < (this.startTime - 10)) {
-          return;
-        }
-        // Drop any message older than 180 seconds from current clock
-        if (nowSec - msgTimestamp > 180) {
-          return;
-        }
+        if (this.startTime && msgTimestamp < (this.startTime - 10)) return;
+        if (nowSec - msgTimestamp > 180) return;
       }
 
-      const botPhoneNum = permissionChecker.normalizeJid(this.botJid) || permissionChecker.normalizeJid(config.ownerNumber);
-      const botLidNum = permissionChecker.normalizeJid(this.botLid);
-      const senderNum = permissionChecker.normalizeJid(senderJid);
-
-      // Check if message was dispatched by the bot itself
-      const isBotSelf = isFromMe ||
-        (this.botJid && senderJid === this.botJid) ||
-        (botPhoneNum && senderNum === botPhoneNum && this.sentBotMsgIds.has(msgId)) ||
-        (botLidNum && senderNum === botLidNum) ||
-        this.sentBotMsgIds.has(msgId);
-
-      // Inbound Message Deduplication: Prevent duplicate processing of the same message event
+      // Deduplication
       const dedupeKey = `${chatJid}:${msgId}`;
-      if (this.processedInboundMsgIds.has(dedupeKey) || this.processedInboundMsgIds.has(msgId)) {
-        return;
-      }
-      // Immediately mark as seen/processing to prevent concurrent race conditions
+      if (this.processedInboundMsgIds.has(dedupeKey) || this.processedInboundMsgIds.has(msgId)) return;
       this.processedInboundMsgIds.add(dedupeKey);
       this.processedInboundMsgIds.add(msgId);
 
-      // Ignore outgoing messages sent by the bot engine itself to prevent loops
-      if (this.sentBotMsgIds.has(msgId)) {
-        return;
-      }
+      if (this.sentBotMsgIds.has(msgId)) return;
 
       const unwrapped = permissionChecker.unwrapMessage(m);
       if (!unwrapped) return;
 
-      const hasMedia = permissionChecker.hasMedia(unwrapped);
-      const mediaType = permissionChecker.detectMediaType(unwrapped);
-
-      // VIDEO RULE: Completely ignore video messages without AI processing or rejection notices
-      if (mediaType === 'video' || unwrapped.videoMessage) {
-        return;
-      }
-
       const rawText = permissionChecker.extractMessageText(unwrapped);
-      const messageText = rawText || (hasMedia ? `[${mediaType.toUpperCase()} Message]` : '');
-      if (!messageText || !messageText.trim()) return;
+      if (!rawText || !rawText.trim()) return;
 
-      const trimmedText = messageText.trim();
+      const trimmedText = rawText.trim();
 
-      // Bot Signature & Echo Filter: Instantly drop any message containing bot outputs to prevent loops
-      if (
-        trimmedText.startsWith('*Control Panel*') ||
-        trimmedText.startsWith('📄 Generated Document:') ||
-        trimmedText.startsWith('📊 Generated Presentation:') ||
-        trimmedText.startsWith('[Sent Document:') ||
-        trimmedText.startsWith('*Mark Zuckerberg*') ||
-        trimmedText.startsWith('Sorry, there was an issue') ||
-        trimmedText.startsWith("Sorry, WhatsApp couldn't download")
-      ) {
+      // STRICT ARTIFACT COMMAND FILTER:
+      // Drop any casual conversation or uncommanded text immediately (0 chat bloat)
+      if (!trimmedText.startsWith('/')) {
         return;
       }
 
       const isGroup = permissionChecker.isGroup(chatJid);
-
-      // In group chats: the bot MUST NEVER reply to its own messages or fromMe messages
-      if (isGroup && isBotSelf) {
-        return;
-      }
-
       const botContext = { botJid: this.botJid, botLid: this.botLid };
       const isOwner = isFromMe || adminCommands.isOwner(senderJid, isFromMe, botContext);
       const senderLabel = isOwner ? 'OWNER' : 'USER';
 
-      // STRICT PERSONAL CHAT (DM) RULE:
-      // Completely disable all automated AI replies in personal chats (1-on-1 DMs).
-      // Only explicit slash commands from the verified owner (/status, /pdf, /ppt, /help) are allowed in DMs.
-      if (!isGroup) {
-        const isSlashCommand = trimmedText.startsWith('/');
-        if (!isOwner || !isSlashCommand) {
-          return;
-        }
-      }
-
-      // Handle Admin Commands (/help, /status, /auto, /chat, /voice, /image, etc.)
-      if (trimmedText.startsWith('/')) {
-        const commandResponse = await adminCommands.handleCommand(trimmedText, senderJid, isFromMe, botContext);
-        if (commandResponse) {
-          logger.info(`[COMMAND] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Command: "${trimmedText}" | Status: EXECUTED`);
-          await this.dispatchMessage(chatJid, { text: commandResponse }, isGroup, m);
-          return;
-        }
-      }
-
-      // MASTER AUTO-REPLY KILLSWITCH (for ALL messages: text, voice, images, skills)
-      if (!db.getAutoReply()) {
+      // Non-owner direct messages (DMs) are dropped
+      if (!isGroup && !isOwner) {
         return;
       }
 
-      // SUB-SWITCH CHECKS FOR SPECIFIC MESSAGE TYPES
-      if ((mediaType === 'audio' || mediaType === 'voice' || unwrapped.audioMessage) && !db.getVoiceReply()) {
-        return;
-      }
-      if ((mediaType === 'image' || unwrapped.imageMessage) && !db.getImageReply()) {
-        return;
-      }
-      if (!hasMedia && !db.getChatReply()) {
-        return;
-      }
-
-      // Check for Specialized Skill Invocations (/pdf, /ppt, /pptx, etc.)
-      const resolvedSkill = skillResolver.resolve(trimmedText, { botPhoneNum });
+      // 1. Check for Specialized Artifact Commands (/pdf, /ppt, /pptx, etc.)
+      const resolvedSkill = skillResolver.resolve(trimmedText);
       if (resolvedSkill.isSkill && resolvedSkill.skill) {
         if (isGroup) {
           const canWrite = await permissionChecker.hasGroupWritePermission(this.sock, chatJid, this.botJid);
           if (!canWrite) return;
         }
 
-        if (!db.getAutoReply()) return;
-        if (!antiBan.checkRateLimit(chatJid)) return;
-
-        const quotedText = permissionChecker.extractQuotedText(m);
-        const skillPrompt = resolvedSkill.prompt || quotedText || '';
-
-        // If skill was invoked without prompt and without quoted text, guide the user
-        if (!skillPrompt.trim()) {
-          const exampleCmd = resolvedSkill.skillName === 'pptx' ? '/ppt' : `/${resolvedSkill.skillName}`;
+        // Quota Check
+        const quota = db.checkUserQuota(senderJid, isOwner);
+        if (!quota.allowed) {
+          logger.warn(`[QUOTA:REJECTED] User ${senderJid} exceeded daily limit (${quota.used}/${quota.limit})`);
           await this.dispatchMessage(chatJid, {
-            text: `*Usage:* \`${exampleCmd} <topic or title>\`\n*Example:* \`${exampleCmd} Artificial Intelligence in 2026\`\n\n_Tip: You can also quote/reply to any message with ${exampleCmd} to generate it from that message._`
+            text: `⚠️ *Daily Limit Reached* (${quota.used}/${quota.limit} used today)\n• Your quota resets in ~${quota.resetInHours}h (00:00 UTC).\n• Contact the bot owner to request VIP access!`
           }, isGroup, m);
           return;
         }
 
-        logger.info(`[SKILL] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid || 'me'}) | Skill: "${resolvedSkill.skillName.toUpperCase()}" | Prompt: "${skillPrompt.substring(0, 100)}"${quotedText ? ' [Quoted Context]' : ''}`);
+        // Anti-Spam Rate Limit
+        if (!isOwner && !antiBan.checkRateLimit(senderJid)) {
+          await this.dispatchMessage(chatJid, {
+            text: `⏳ *Cooldown Active* — Please wait a few seconds before requesting another generation.`
+          }, isGroup, m);
+          return;
+        }
 
-        // Apply human typing delay
+        const quotedText = permissionChecker.extractQuotedText(m);
+        const skillPrompt = resolvedSkill.prompt || quotedText || '';
+
+        // Guide if topic missing
+        if (!skillPrompt.trim()) {
+          const cmdName = resolvedSkill.skillName === 'pptx' ? 'ppt' : resolvedSkill.skillName;
+          await this.dispatchMessage(chatJid, {
+            text: `*Usage:* \`/${cmdName} <topic or title>\`\n*Example:* \`/${cmdName} Artificial Intelligence in 2026\`\n\n_Tip: You can also reply to any message with /${cmdName} to convert that message!_`
+          }, isGroup, m);
+          return;
+        }
+
+        logger.info(`[ARTIFACT:START] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Type: ${resolvedSkill.skillName.toUpperCase()} | Prompt: "${skillPrompt.substring(0, 80)}"`);
+
+        // Typing indicator
         await antiBan.applyHumanDelay(this.sock, chatJid);
 
         try {
-          const skillContext = {
+          const skillResult = await resolvedSkill.skill.execute({
             prompt: skillPrompt,
             quotedText: quotedText || '',
             senderJid,
             isOwner,
             chatJid,
-            isGroup,
-            rawMessage: messageText,
-            m
-          };
+            isGroup
+          });
 
-          const skillResult = await resolvedSkill.skill.execute(skillContext);
-
-          if (skillResult && skillResult.type === 'document' && skillResult.content) {
+          if (skillResult && skillResult.buffer) {
             const sent = await this.dispatchMessage(chatJid, {
-              document: skillResult.content,
-              mimetype: skillResult.mimetype || 'application/pdf',
-              fileName: skillResult.filename || 'document.pdf',
-              caption: skillResult.caption || `📄 Generated Document: *${skillResult.title || 'PDF'}*`
+              document: skillResult.buffer,
+              mimetype: skillResult.mimetype || (resolvedSkill.skillName === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/pdf'),
+              fileName: skillResult.filename || `artifact.${resolvedSkill.skillName === 'pptx' ? 'pptx' : 'pdf'}`,
+              caption: skillResult.caption || `Generated ${resolvedSkill.skillName.toUpperCase()}`
             }, isGroup, m);
 
             if (sent) {
-              db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
-              db.addMessage(chatJid, 'assistant', `[Sent Document: ${skillResult.filename || 'document.pdf'}]`, this.botJid, false);
+              db.recordGeneration(senderJid, isOwner, {
+                type: resolvedSkill.skillName,
+                title: skillResult.title,
+                pagesOrSlides: skillResult.pageCount || skillResult.slideCount || 1,
+                latencyMs: skillResult.latencyMs || 0,
+                modelUsed: skillResult.modelUsed || '',
+                keyUsed: skillResult.keyUsed || ''
+              });
               antiBan.recordReply(chatJid);
-              logger.info(`[SKILL:DISPATCH] Target: ${chatJid} | Document: ${skillResult.filename} | Status: DELIVERED`);
-            }
-            return;
-          } else if (skillResult && (skillResult.type === 'text' || typeof skillResult === 'string')) {
-            const textContent = typeof skillResult === 'string' ? skillResult : skillResult.content;
-            if (textContent && textContent.trim()) {
-              const sent = await this.dispatchMessage(chatJid, { text: textContent.trim() }, isGroup, m);
-              if (sent) {
-                db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
-                db.addMessage(chatJid, 'assistant', textContent.trim(), this.botJid, false);
-                antiBan.recordReply(chatJid);
-                logger.info(`[SKILL:DISPATCH] Target: ${chatJid} | Status: DELIVERED`);
-              }
-              return;
+              logger.info(`[ARTIFACT:DELIVERED] ${skillResult.filename} dispatched successfully to ${chatJid}`);
             }
           }
         } catch (skillErr) {
-          logger.error(`[SKILL:ERROR] Failed executing skill '${resolvedSkill.skillName}':`, skillErr.stack || skillErr.message);
-          await this.dispatchMessage(chatJid, { text: `Sorry, there was an issue generating your ${resolvedSkill.skillName.toUpperCase()} document. Please try again with a slightly different prompt!` }, isGroup, m);
-          return;
+          logger.error(`[ARTIFACT:ERROR] Generation failed:`, skillErr.stack || skillErr.message);
+          await this.dispatchMessage(chatJid, {
+            text: `❌ *Generation Error*: Could not generate ${resolvedSkill.skillName.toUpperCase()} at this moment. Please try again with a slightly different prompt!`
+          }, isGroup, m);
         }
+        return;
       }
 
-      // Group Message Trigger Logic (Works for both owner and members with @mark, @<botNumber>, or quote to bot)
-      if (isGroup) {
-        const isMentioned = permissionChecker.isBotMentionedInGroup(m, this.botJid, this.botLid, messageText, senderJid, this.sentBotMsgIds);
-        if (!isMentioned) return;
-
-        const canWrite = await permissionChecker.hasGroupWritePermission(this.sock, chatJid, this.botJid);
-        if (!canWrite) return;
-      }
-
-      if (!db.getAutoReply()) return;
-      if (!antiBan.checkRateLimit(chatJid)) return;
-
-      logger.info(`[INPUT] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid || 'me'}) | Prompt: "${messageText.substring(0, 100)}"${hasMedia ? ` [Media: ${mediaType}]` : ''}`);
-
-      const history = db.getConversationHistory(chatJid);
-
-      // Extract quoted message context if present
-      const quotedText = permissionChecker.extractQuotedText(m);
-      let promptToSend = rawText || '';
-      if (quotedText && quotedText.trim()) {
-        logger.info(`[CONTEXT] Quoted message detected: "${quotedText.substring(0, 100)}"`);
-        promptToSend = `[Replying to quoted message]: "${quotedText.trim()}"\n${promptToSend || messageText}`;
-      }
-
-      // Download media buffer if available for multimodal processing
-      let mediaBase64 = null;
-      let mediaMimeType = null;
-      if (hasMedia) {
-        if (mediaType === 'video' && unwrapped.videoMessage?.jpegThumbnail) {
-          mediaBase64 = Buffer.from(unwrapped.videoMessage.jpegThumbnail).toString('base64');
-          mediaMimeType = 'image/jpeg';
-        } else if (typeof downloadMediaMessage === 'function') {
-          try {
-            const buffer = await downloadMediaMessage(m, 'buffer', {});
-            if (buffer && Buffer.isBuffer(buffer)) {
-              mediaBase64 = buffer.toString('base64');
-              mediaMimeType = unwrapped.imageMessage?.mimetype || unwrapped.audioMessage?.mimetype || unwrapped.videoMessage?.mimetype || 'image/jpeg';
-            }
-          } catch (mediaErr) {
-            logger.warn(`Media download warning (${mediaErr.message}).`);
-          }
-        }
-
-        // Graceful error if media was present but download completely failed
-        if (!mediaBase64 && (mediaType === 'image' || mediaType === 'audio' || mediaType === 'voice')) {
-          logger.warn(`[MEDIA] Media download failed for ${mediaType} from ${senderJid}. Sending user notification.`);
-          await this.dispatchMessage(chatJid, { text: `Sorry, WhatsApp couldn't download that ${mediaType === 'image' ? 'image' : 'audio message'}. Please try sending it again!` }, isGroup, m);
-          return;
-        }
-      }
-
-      // Apply silent pause followed by typing animation
-      await antiBan.applyHumanDelay(this.sock, chatJid);
-
-      // Generate AI response from active AI Provider (NVIDIA / Groq)
-      let aiReply = '';
-      try {
-        aiReply = await aiProvider.generateResponse(promptToSend || messageText, history, {
-          messageId: msgId,
-          chatId: chatJid,
-          isOwner: isOwner,
-          isMedia: hasMedia,
-          mediaType: mediaType,
-          mediaBase64: mediaBase64,
-          mediaMimeType: mediaMimeType
-        });
-      } catch (aiErr) {
-        logger.error(`AI generation error for ${chatJid}:`, aiErr.message);
-      }
-
-      // Only dispatch and store if a valid, non-empty user-facing reply was generated
-      if (this.sock && aiReply && typeof aiReply === 'string' && aiReply.trim()) {
-        const validatedReply = aiReply.trim();
-        const sent = await this.dispatchMessage(chatJid, { text: validatedReply }, isGroup, m);
-        if (sent) {
-          db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
-          db.addMessage(chatJid, 'assistant', validatedReply, this.botJid, false);
-          antiBan.recordReply(chatJid);
-          logger.info(`[DISPATCH] Target: ${chatJid} | Status: DELIVERED`);
-        }
-      } else {
-        logger.warn(`No valid user-facing AI reply generated for ${chatJid}. Conversation history left unchanged.`);
+      // 2. Handle Utility & Admin Commands (/help, /usage, /limit, /status, /stats, /keys, etc.)
+      const commandResponse = await adminCommands.handleCommand(trimmedText, senderJid, isFromMe, botContext);
+      if (commandResponse) {
+        logger.info(`[COMMAND] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Command: "${trimmedText}"`);
+        await this.dispatchMessage(chatJid, { text: commandResponse }, isGroup, m);
       }
 
     } catch (err) {
@@ -524,14 +370,11 @@ class WhatsAppBotEngine extends EventEmitter {
       qrCodeDataUrl: this.qrCodeDataUrl,
       botJid: this.botJid,
       botLid: this.botLid,
-      autoReply: db.getAutoReply(),
       analytics: db.getAnalytics(),
-      aiStatus: aiProvider.getStatus(),
-      groqStatus: aiProvider.getStatus()
+      aiStatus: aiProvider.getStatus()
     };
   }
 }
 
-export const botEngine = new WhatsAppBotEngine();
+export const botEngine = new WhatsAppArtifactEngine();
 export { BoundedTtlSet };
-

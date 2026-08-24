@@ -3,14 +3,32 @@ import path from 'path';
 import { config } from '../config.js';
 import { logger } from './logger.js';
 
-class JsonDatabase {
+function getTodayString() {
+  return new Date().toISOString().split('T')[0];
+}
+
+function getHoursUntilMidnightUtc() {
+  const now = new Date();
+  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+  return Math.max(1, Math.round((midnight.getTime() - now.getTime()) / (1000 * 60 * 60)));
+}
+
+class ArtifactDatabase {
   constructor(filePath) {
     this.filePath = filePath;
     this.data = {
-      conversations: {},
-      settings: { autoReply: true, voiceReply: true, imageReply: true },
-      analytics: { totalMessagesProcessed: 0, totalRepliesSent: 0, rateLimitedCount: 0, keyRotationsCount: 0 },
-      rules: []
+      quotas: {},
+      vips: [],
+      analytics: {
+        totalArtifactsGenerated: 0,
+        totalPdfsGenerated: 0,
+        totalPptsGenerated: 0,
+        totalGenerationsToday: 0,
+        todayDate: getTodayString(),
+        avgLatencyMs: 0,
+        keyUsageStats: {}
+      },
+      recentGenerations: []
     };
     this.init();
   }
@@ -21,72 +39,35 @@ class JsonDatabase {
         const raw = fs.readFileSync(this.filePath, 'utf8');
         const parsed = JSON.parse(raw);
         this.data = {
-          conversations: parsed.conversations || {},
-          settings: {
-            autoReply: true,
-            voiceReply: true,
-            imageReply: true,
-            ...(parsed.settings || {})
+          quotas: parsed.quotas || {},
+          vips: Array.isArray(parsed.vips) ? parsed.vips : [],
+          analytics: {
+            totalArtifactsGenerated: parsed.analytics?.totalArtifactsGenerated || 0,
+            totalPdfsGenerated: parsed.analytics?.totalPdfsGenerated || 0,
+            totalPptsGenerated: parsed.analytics?.totalPptsGenerated || 0,
+            totalGenerationsToday: parsed.analytics?.totalGenerationsToday || 0,
+            todayDate: parsed.analytics?.todayDate || getTodayString(),
+            avgLatencyMs: parsed.analytics?.avgLatencyMs || 0,
+            keyUsageStats: parsed.analytics?.keyUsageStats || {}
           },
-          analytics: { ...this.data.analytics, ...(parsed.analytics || {}) },
-          rules: parsed.rules || []
+          recentGenerations: Array.isArray(parsed.recentGenerations) ? parsed.recentGenerations : []
         };
-        this.sanitizeStoredConversations();
+        this.checkGlobalDateRollover();
       } else {
         this.save();
       }
     } catch (err) {
-      logger.error('Database reset to default schema.', err.message);
+      logger.error('Database load error, initialized fresh structure:', err.message);
       this.save();
     }
   }
 
-  sanitizeStoredConversations() {
-    let modified = false;
-    for (const jid of Object.keys(this.data.conversations)) {
-      const conv = this.data.conversations[jid];
-      if (conv && Array.isArray(conv.messages)) {
-        const cleanedMsgs = [];
-        for (const msg of conv.messages) {
-          if (!msg || !msg.content || typeof msg.content !== 'string') continue;
-
-          // Remove bot control panel echoes or unauthorized error traces from history
-          if (msg.content.includes('*Control Panel* › *Access Denied*') || msg.content.includes('ye command sirf Gohar bhai ko hi milta hai')) {
-            modified = true;
-            continue;
-          }
-
-          if (msg.role === 'assistant') {
-            let cleaned = msg.content
-              .replace(/<(think|thought|reasoning|reflection|analysis|details|inner_monologue)>[\s\S]*?<\/\1>/gi, '')
-              .replace(/<(think|thought|reasoning|reflection|analysis|details|inner_monologue)>[\s\S]*/gi, '');
-
-            const finalMatch = cleaned.match(/(?:^|\n)(?:#{1,4}\s*)?(?:\*\*)?(?:Final\s+(?:Response|Answer|Output|Message)|Conversational\s+Reply|Direct\s+Reply|Message|Final:)(?:\*\*)?:?\s*\n*([\s\S]*)$/i);
-            if (finalMatch && finalMatch[1] && finalMatch[1].trim()) {
-              cleaned = finalMatch[1];
-            } else {
-              cleaned = cleaned
-                .replace(/(?:^|\n)(?:Here's\s+a\s+thinking\s+process:?|Thinking\s+Process:?|Thought\s+Process:?|Internal\s+Reasoning:?)[\s\S]*?(?=\n\n[A-Za-z0-9]|$)/gi, '')
-                .replace(/(?:^|\n)(?:#{1,4}\s*)?(?:\*\*)?(?:Role\s*(?:&|and)\s*Ambition|User\s*Profile|Persona(?:\s*Analysis)?|Goals|Current\s*Actions|Architecture\s*Insight|System\s*Architecture|Draft\s*Response|Refine\s*(?:\([^)]*\))?|Final\s*Check)(?:\*\*)?:?[\s\S]*?(?=\n\n[A-Za-z0-9]|$)/gi, '')
-                .replace(/^(?:Let's\s+(?:see|analyze|check|think)|Analyzing\s+user|The user is|Okay,?\s+the user)[\s\S]*?(?=\n\n[A-Za-z0-9]|$)/gim, '');
-            }
-            cleaned = cleaned.trim();
-            if (cleaned && !/^(?:Done\.|Proceeds\.|Ready\.|\*?\*?Role\b.*)$/im.test(cleaned)) {
-              cleanedMsgs.push({ ...msg, content: cleaned });
-            } else {
-              modified = true;
-            }
-          } else {
-            cleanedMsgs.push(msg);
-          }
-        }
-        if (cleanedMsgs.length !== conv.messages.length) modified = true;
-        conv.messages = cleanedMsgs;
-      }
-    }
-    if (modified) {
+  checkGlobalDateRollover() {
+    const today = getTodayString();
+    if (this.data.analytics.todayDate !== today) {
+      this.data.analytics.todayDate = today;
+      this.data.analytics.totalGenerationsToday = 0;
       this.save();
-      logger.info('Database history sanitized: removed stale leaked reasoning and loop records.');
     }
   }
 
@@ -98,7 +79,6 @@ class JsonDatabase {
       try {
         fs.writeFileSync(this.filePath, payload, 'utf8');
       } catch (writeErr) {
-        // In case another process holds db.json open on Windows, write to temp and rename
         const tempPath = `${this.filePath}.${Date.now()}.tmp`;
         try {
           fs.writeFileSync(tempPath, payload, 'utf8');
@@ -112,113 +92,189 @@ class JsonDatabase {
     }
   }
 
-  getConversationHistory(jid) {
-    return this.data.conversations[jid]?.messages || [];
+  normalizeJid(jid) {
+    if (!jid || typeof jid !== 'string') return '';
+    return jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
   }
 
-  addMessage(jid, role, content, senderJid = null, isOwner = false) {
-    if (!content || typeof content !== 'string' || !content.trim()) return;
-    if (!this.data.conversations[jid]) {
-      this.data.conversations[jid] = { updatedAt: new Date().toISOString(), messages: [] };
+  isVip(jidOrPhone) {
+    const num = this.normalizeJid(jidOrPhone);
+    if (!num) return false;
+    return this.data.vips.includes(num);
+  }
+
+  setVip(jidOrPhone, isVip = true) {
+    const num = this.normalizeJid(jidOrPhone);
+    if (!num) return false;
+    if (isVip && !this.data.vips.includes(num)) {
+      this.data.vips.push(num);
+    } else if (!isVip) {
+      this.data.vips = this.data.vips.filter(v => v !== num);
     }
-    const messages = this.data.conversations[jid].messages;
-    messages.push({
-      role,
-      content: content.trim(),
-      senderJid: senderJid || null,
-      isOwner: Boolean(isOwner),
-      timestamp: new Date().toISOString()
-    });
-    if (messages.length > 20) {
-      this.data.conversations[jid].messages = messages.slice(-20);
-    }
-    this.data.conversations[jid].updatedAt = new Date().toISOString();
-    if (role === 'user') {
-      this.data.analytics.totalMessagesProcessed = (this.data.analytics.totalMessagesProcessed || 0) + 1;
-    }
-    this.save();
-  }
-
-  getAutoReply() { return this.data.settings.autoReply !== false; }
-  setAutoReply(enabled) { this.data.settings.autoReply = Boolean(enabled); this.save(); }
-
-  getChatReply() { return this.data.settings.chatReply !== false; }
-  setChatReply(enabled) { this.data.settings.chatReply = Boolean(enabled); this.save(); }
-
-  getVoiceReply() { return this.data.settings.voiceReply !== false; }
-  setVoiceReply(enabled) { this.data.settings.voiceReply = Boolean(enabled); this.save(); }
-
-  getImageReply() { return this.data.settings.imageReply !== false; }
-  setImageReply(enabled) { this.data.settings.imageReply = Boolean(enabled); this.save(); }
-
-  getProvider() {
-    return (this.data.settings.provider || config.defaultProvider || 'nvidia').toLowerCase();
-  }
-
-  setProvider(provider) {
-    const valid = ['groq', 'nvidia', 'auto'];
-    const p = (provider || '').toLowerCase();
-    if (!valid.includes(p)) throw new Error(`Invalid provider '${provider}'. Valid choices: ${valid.join(', ')}`);
-    this.data.settings.provider = p;
-    this.save();
-    return p;
-  }
-
-  incrementMetric(key) {
-    if (typeof this.data.analytics[key] === 'number') {
-      this.data.analytics[key] += 1;
-    } else {
-      this.data.analytics[key] = 1;
-    }
-    this.save();
-  }
-
-  resetAllData() {
-    this.data.conversations = {};
-    this.data.analytics = {
-      totalMessagesProcessed: 0,
-      totalRepliesSent: 0,
-      rateLimitedCount: 0,
-      keyRotationsCount: 0
-    };
     this.save();
     return true;
   }
 
-  clearContext(jid) {
-    if (this.data.conversations[jid]) {
-      delete this.data.conversations[jid];
+  /**
+   * Checks daily generation quota for a user.
+   */
+  checkUserQuota(userJid, isOwner = false) {
+    const userPhone = this.normalizeJid(userJid);
+    const isVipUser = isOwner || this.isVip(userPhone);
+
+    if (isVipUser) {
+      return {
+        allowed: true,
+        isUnlimited: true,
+        remaining: Infinity,
+        limit: Infinity,
+        used: 0,
+        resetInHours: 0
+      };
+    }
+
+    const today = getTodayString();
+    let record = this.data.quotas[userPhone];
+
+    if (!record || record.date !== today) {
+      record = {
+        date: today,
+        total: 0,
+        pdfCount: 0,
+        pptCount: 0,
+        lastUsed: 0
+      };
+      this.data.quotas[userPhone] = record;
+    }
+
+    const limit = config.dailyUserLimit || 10;
+    const used = record.total || 0;
+    const remaining = Math.max(0, limit - used);
+    const allowed = used < limit;
+
+    return {
+      allowed,
+      isUnlimited: false,
+      remaining,
+      limit,
+      used,
+      resetInHours: getHoursUntilMidnightUtc()
+    };
+  }
+
+  /**
+   * Records a successful artifact generation event.
+   */
+  recordGeneration(userJid, isOwner, metadata = {}) {
+    const {
+      type = 'pdf',
+      title = 'Untitled',
+      pagesOrSlides = 1,
+      latencyMs = 0,
+      modelUsed = '',
+      keyUsed = ''
+    } = metadata;
+
+    const userPhone = this.normalizeJid(userJid);
+    const today = getTodayString();
+    this.checkGlobalDateRollover();
+
+    // Update user quota
+    if (!this.data.quotas[userPhone] || this.data.quotas[userPhone].date !== today) {
+      this.data.quotas[userPhone] = { date: today, total: 0, pdfCount: 0, pptCount: 0, lastUsed: 0 };
+    }
+    const userRecord = this.data.quotas[userPhone];
+    userRecord.total = (userRecord.total || 0) + 1;
+    if (type === 'pdf') {
+      userRecord.pdfCount = (userRecord.pdfCount || 0) + 1;
+    } else {
+      userRecord.pptCount = (userRecord.pptCount || 0) + 1;
+    }
+    userRecord.lastUsed = Date.now();
+
+    // Update global analytics
+    const a = this.data.analytics;
+    a.totalArtifactsGenerated = (a.totalArtifactsGenerated || 0) + 1;
+    a.totalGenerationsToday = (a.totalGenerationsToday || 0) + 1;
+    if (type === 'pdf') {
+      a.totalPdfsGenerated = (a.totalPdfsGenerated || 0) + 1;
+    } else {
+      a.totalPptsGenerated = (a.totalPptsGenerated || 0) + 1;
+    }
+
+    // Update rolling average latency
+    if (latencyMs > 0) {
+      if (a.avgLatencyMs === 0) {
+        a.avgLatencyMs = latencyMs;
+      } else {
+        a.avgLatencyMs = Math.round((a.avgLatencyMs * 0.8) + (latencyMs * 0.2));
+      }
+    }
+
+    // Update key stats
+    if (keyUsed) {
+      a.keyUsageStats[keyUsed] = (a.keyUsageStats[keyUsed] || 0) + 1;
+    }
+
+    // Add to recent activity log
+    this.data.recentGenerations.unshift({
+      id: `gen_${Date.now()}`,
+      type,
+      title,
+      pagesOrSlides,
+      latencyMs,
+      modelUsed,
+      userPhone: userPhone ? `${userPhone.slice(0, 4)}***${userPhone.slice(-3)}` : 'Unknown',
+      isOwner: Boolean(isOwner),
+      timestamp: new Date().toISOString()
+    });
+
+    if (this.data.recentGenerations.length > 50) {
+      this.data.recentGenerations = this.data.recentGenerations.slice(0, 50);
+    }
+
+    this.save();
+  }
+
+  resetUserQuota(jidOrPhone) {
+    const userPhone = this.normalizeJid(jidOrPhone);
+    if (this.data.quotas[userPhone]) {
+      delete this.data.quotas[userPhone];
       this.save();
       return true;
     }
     return false;
   }
 
-  getRules() {
-    return this.data.rules || [];
-  }
-
-  addRule(ruleText) {
-    if (!this.data.rules) this.data.rules = [];
-    this.data.rules.push(ruleText);
+  resetAllQuotas() {
+    this.data.quotas = {};
     this.save();
     return true;
   }
 
-  removeRule(index) {
-    if (!this.data.rules || index < 1 || index > this.data.rules.length) return false;
-    this.data.rules.splice(index - 1, 1);
-    this.save();
-    return true;
+  getAnalytics() {
+    this.checkGlobalDateRollover();
+    return {
+      ...this.data.analytics,
+      vipCount: this.data.vips.length,
+      activeUsersToday: Object.keys(this.data.quotas).filter(k => this.data.quotas[k].date === getTodayString()).length,
+      recentGenerations: this.data.recentGenerations.slice(0, 10)
+    };
   }
 
-  clearRules() {
-    this.data.rules = [];
-    this.save();
-    return true;
+  getTopUsers(limit = 10) {
+    const today = getTodayString();
+    return Object.entries(this.data.quotas)
+      .filter(([_, q]) => q.date === today)
+      .map(([phone, q]) => ({
+        phone,
+        total: q.total || 0,
+        pdfCount: q.pdfCount || 0,
+        pptCount: q.pptCount || 0
+      }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, limit);
   }
-
-  getAnalytics() { return { ...this.data.analytics }; }
 }
 
-export const db = new JsonDatabase(config.dbFilePath);
+export const db = new ArtifactDatabase(config.dbFilePath);

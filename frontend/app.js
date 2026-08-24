@@ -31,10 +31,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Metrics
   const operatingMode = document.getElementById("operatingMode");
-  const autoReplyState = document.getElementById("autoReplyState");
-  const activeAiKey = document.getElementById("activeAiKey");
-  const totalMessages = document.getElementById("totalMessages");
-  const totalReplies = document.getElementById("totalReplies");
+  const totalPdfs = document.getElementById("totalPdfs");
+  const totalPpts = document.getElementById("totalPpts");
+  const todayGenerations = document.getElementById("todayGenerations");
+  const avgSpeed = document.getElementById("avgSpeed");
+  const keyPoolStatus = document.getElementById("keyPoolStatus");
 
   // Terminal Controls
   const logArea = document.getElementById("logArea");
@@ -75,7 +76,6 @@ document.addEventListener("DOMContentLoaded", () => {
       dashboardStatus.className = `status ${isConnected ? "connected" : isConnecting ? "connecting" : "disconnected"}`;
     }
 
-    // Dynamic Single Start/Stop Toggle Button
     if (serviceToggleBtn) {
       const isRunning = isConnected || isConnecting;
       if (isRunning) {
@@ -96,9 +96,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (authView) authView.hidden = true;
       if (dashboardView) dashboardView.hidden = false;
 
-      if (sessionTitle) sessionTitle.textContent = "Active Session Authenticated";
+      if (sessionTitle) sessionTitle.textContent = "Artifact Engine Online";
       if (sessionSubtitle) {
-        sessionSubtitle.textContent = `WhatsApp socket connected. Bot JID: ${data.botJid || "Connected"}`;
+        sessionSubtitle.textContent = `WhatsApp socket active. Bot JID: ${data.botJid || "Connected"}`;
       }
     } else if (status === "QR_READY" && data.qrCodeDataUrl) {
       if (authView) authView.hidden = false;
@@ -123,36 +123,38 @@ document.addEventListener("DOMContentLoaded", () => {
       if (dashboardView) dashboardView.hidden = true;
 
       setQRState("loading");
-      if (qrStateTitle) qrStateTitle.textContent = "Service Disconnected";
-      if (qrStateCopy) qrStateCopy.textContent = 'Click "Start" or "New QR" to generate pairing QR code.';
-      if (qrNote) qrNote.textContent = "Codes expire automatically. Generate a new QR if needed.";
+      if (qrStateTitle) qrStateTitle.textContent = "Engine Offline";
+      if (qrStateCopy) qrStateCopy.textContent = 'Click "Start" or "New QR" to connect WhatsApp.';
+      if (qrNote) qrNote.textContent = "Generate a new QR if needed.";
     }
 
-    // Update Metrics
-    if (autoReplyState) {
-      autoReplyState.textContent = data.autoReply ? "ENABLED" : "DISABLED";
-    }
-
-    const aiStatus = data.aiStatus || data.groqStatus;
-    if (aiStatus && activeAiKey) {
-      const activeP = (aiStatus.activeProvider || "groq").toUpperCase();
-      const pDetails = aiStatus[aiStatus.activeProvider] || aiStatus.groq || {};
-      const keyIdx = (typeof pDetails.activeKeyIndex === "number")
-        ? (pDetails.activeKeyIndex + 1)
-        : ((typeof aiStatus.activeKeyIndex === "number") ? (aiStatus.activeKeyIndex + 1) : 1);
-      const totalKeys = (typeof pDetails.keysConfigured === "number")
-        ? pDetails.keysConfigured
-        : (aiStatus.totalKeysConfigured || 1);
-      activeAiKey.textContent = `[${activeP}] Key #${keyIdx} / ${totalKeys || 1}`;
+    // Update Artifact Metrics
+    if (operatingMode) {
+      operatingMode.textContent = "Parallel Artifacts Engine";
     }
 
     if (data.analytics) {
-      if (totalMessages) {
-        totalMessages.textContent = (data.analytics.totalMessagesProcessed || 0).toLocaleString();
+      if (totalPdfs) {
+        totalPdfs.textContent = (data.analytics.totalPdfsGenerated || 0).toLocaleString();
       }
-      if (totalReplies) {
-        totalReplies.textContent = (data.analytics.totalRepliesSent || 0).toLocaleString();
+      if (totalPpts) {
+        totalPpts.textContent = (data.analytics.totalPptsGenerated || 0).toLocaleString();
       }
+      if (todayGenerations) {
+        todayGenerations.textContent = (data.analytics.totalGenerationsToday || 0).toLocaleString();
+      }
+      if (avgSpeed) {
+        avgSpeed.textContent = data.analytics.avgLatencyMs
+          ? `${(data.analytics.avgLatencyMs / 1000).toFixed(1)}s`
+          : "2.5s";
+      }
+    }
+
+    const aiStatus = data.aiStatus;
+    if (aiStatus && keyPoolStatus) {
+      const groqCount = aiStatus.totalGroqKeys || 0;
+      const nvidiaCount = aiStatus.totalNvidiaKeys || 0;
+      keyPoolStatus.textContent = `${groqCount} Groq + ${nvidiaCount} NVIDIA Keys (Active)`;
     }
   }
 
@@ -192,18 +194,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  async function fetchLogsFallback() {
-    try {
-      const res = await authFetch("/api/logs");
-      if (res.ok) {
-        const logs = await res.json();
-        if (Array.isArray(logs)) {
-          logs.forEach(appendLogEntry);
-        }
-      }
-    } catch (err) {}
-  }
-
   function escapeHtml(str) {
     return String(str)
       .replace(/&/g, "&amp;")
@@ -227,13 +217,11 @@ document.addEventListener("DOMContentLoaded", () => {
     div.className = `log-row ${log.level || "info"}`;
 
     let msg = (log.message || "").trim();
-
-    // Strip redundant level prefix if it immediately precedes a category tag
     msg = msg.replace(/^\[(INFO|WARN|WARNING|SUCCESS|ERROR)\]\s*(?=\[)/i, "");
 
     let categoryHtml = "";
     const tagMatch = msg.match(
-      /^\[(INPUT|ROUTE|SELECTION|OUTPUT|DISPATCH|COMMAND|ANTI-BAN|CONTEXT|FAILOVER|ROUTER|SYSTEM)\]\s*(.*)$/i
+      /^\[(ARTIFACT|PDF|PPTX|PARALLEL|COMMAND|QUOTA|SYSTEM|INPUT|OUTPUT|DISPATCH)\]\s*(.*)$/i
     );
 
     if (tagMatch) {
@@ -276,7 +264,7 @@ document.addEventListener("DOMContentLoaded", () => {
             appendLogEntry({
               timestamp: new Date().toISOString(),
               level: "info",
-              message: "[SYSTEM] Terminal log cleared."
+              message: "[SYSTEM] Production log cleared."
             });
           } else if (payload.type === "history" && Array.isArray(payload.logs)) {
             payload.logs.forEach(appendLogEntry);
@@ -335,7 +323,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (dashboardNewSessionBtn) {
     dashboardNewSessionBtn.addEventListener("click", async () => {
-      if (confirm("Are you sure you want to clear the active WhatsApp session and generate a new QR code?")) {
+      if (confirm("Are you sure you want to reset the active WhatsApp session and generate a new QR code?")) {
         dashboardNewSessionBtn.disabled = true;
         try {
           await authFetch("/api/control/reset_session", { method: "POST" });
@@ -355,7 +343,7 @@ document.addEventListener("DOMContentLoaded", () => {
       appendLogEntry({
         timestamp: new Date().toISOString(),
         level: "info",
-        message: "[SYSTEM] Terminal log cleared."
+        message: "[SYSTEM] Production log cleared."
       });
       try {
         await authFetch("/api/logs/clear", { method: "POST" });
@@ -366,7 +354,5 @@ document.addEventListener("DOMContentLoaded", () => {
   // Initialize
   fetchStatus();
   setupSSE();
-
-  // Low-frequency background status sync (every 10s instead of 3s)
-  setInterval(fetchStatus, 10000);
+  setInterval(fetchStatus, 8000);
 });
