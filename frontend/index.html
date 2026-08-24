@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Control Panel</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Auth View (Shown during pairing / disconnected) -->
+  <section id="authView" class="view" aria-labelledby="authBrand">
+    <header class="topbar auth-topbar">
+      <div class="topbar-inner">
+        <div class="identity">
+          <h1 id="authBrand" class="brand">Control Panel</h1>
+        </div>
+        <div id="authStatus" class="status disconnected" role="status" aria-live="polite">
+          <span class="status-marker" aria-hidden="true"></span>
+          <span class="status-text">DISCONNECTED</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <div class="auth-layout">
+        <section class="auth-instructions" aria-labelledby="setupHeading">
+          <h2 id="setupHeading" class="section-heading">Link WhatsApp Device</h2>
+          <ol class="instructions">
+            <li>
+              <span class="instruction-title">Start the service</span>
+              <span class="instruction-copy">Select Start or New QR to generate a secure pairing QR code.</span>
+            </li>
+            <li>
+              <span class="instruction-title">Open Linked Devices</span>
+              <span class="instruction-copy">On your phone, open WhatsApp &gt; Settings &gt; Linked Devices.</span>
+            </li>
+            <li>
+              <span class="instruction-title">Scan the QR code</span>
+              <span class="instruction-copy">Tap "Link a Device" and scan the pairing code displayed here.</span>
+            </li>
+            <li>
+              <span class="instruction-title">Automated synchronization</span>
+              <span class="instruction-copy">Once authenticated, the console automatically switches to live operational mode.</span>
+            </li>
+          </ol>
+          <div class="auth-actions" aria-label="Session controls">
+            <button id="serviceToggleBtn" class="button-primary" type="button">Start</button>
+            <button id="newSessionBtn" type="button">New QR</button>
+          </div>
+        </section>
+
+        <section class="auth-qr" aria-labelledby="qrHeading">
+          <h2 id="qrHeading" class="section-heading">Device Pairing Code</h2>
+          <div class="qr-content">
+            <div id="qrBox" class="qr-box" aria-live="polite">
+              <div id="qrLoading" class="qr-state active">
+                <div class="qr-state-inner">
+                  <div class="spinner" aria-hidden="true"></div>
+                  <p class="state-title" id="qrStateTitle">Initializing Service</p>
+                  <p class="state-copy" id="qrStateCopy">Click Start to generate pairing QR code.</p>
+                </div>
+              </div>
+
+              <div id="qrReady" class="qr-state">
+                <img id="qrImage" alt="WhatsApp Pairing QR Code" src="">
+              </div>
+
+              <div id="qrConnected" class="qr-state">
+                <div class="qr-state-inner">
+                  <div class="confirmation-mark" aria-hidden="true">✓</div>
+                  <p class="state-title">Device Connected</p>
+                  <p class="state-copy">Active session authenticated. Switching to console...</p>
+                </div>
+              </div>
+            </div>
+            <p class="qr-note" id="qrNote">Scan QR code using WhatsApp linked devices.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </section>
+
+  <!-- Dashboard View (Shown when socket is connected) -->
+  <section id="dashboardView" class="view" hidden aria-labelledby="dashboardBrand">
+    <header class="topbar dashboard-topbar">
+      <div class="topbar-inner">
+        <div class="identity">
+          <h1 id="dashboardBrand" class="brand">Control Panel</h1>
+        </div>
+        <div id="dashboardStatus" class="status connected" role="status">
+          <span class="status-marker" aria-hidden="true"></span>
+          <span id="dashboardStatusText" class="status-text">CONNECTED</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="page dashboard-page">
+      <dl class="metrics" aria-label="Service metrics">
+        <div class="metric">
+          <dt>Operating Mode</dt>
+          <dd id="operatingMode">Group &amp; Personal</dd>
+        </div>
+        <div class="metric">
+          <dt>Auto-Reply State</dt>
+          <dd id="autoReplyState">--</dd>
+        </div>
+        <div class="metric">
+          <dt>Active AI Key Index</dt>
+          <dd id="activeAiKey">--</dd>
+        </div>
+        <div class="metric">
+          <dt>Total Messages Processed</dt>
+          <dd id="totalMessages">0</dd>
+        </div>
+        <div class="metric">
+          <dt>Total AI Replies Sent</dt>
+          <dd id="totalReplies">0</dd>
+        </div>
+      </dl>
+
+      <div class="dashboard-layout">
+        <aside class="control-panel" aria-labelledby="controlsHeading">
+          <h2 id="controlsHeading" class="panel-heading">Service Controls</h2>
+          <div class="control-body">
+            <div class="control-actions">
+              <button id="dashboardStopBtn" class="button-danger" type="button">Stop Service</button>
+              <button id="dashboardNewSessionBtn" type="button">Reset Session</button>
+            </div>
+            <div class="session-confirmation">
+              <p class="session-confirmation-title" id="sessionTitle">Active Session Authenticated</p>
+              <p class="session-confirmation-copy" id="sessionSubtitle">WhatsApp socket connected. QR code hidden.</p>
+            </div>
+          </div>
+        </aside>
+
+        <section class="terminal-panel" aria-labelledby="terminalHeading">
+          <header class="terminal-header">
+            <h2 id="terminalHeading" class="terminal-title">Live Event Terminal Stream</h2>
+            <div class="terminal-tools">
+              <label class="checkbox-label" for="autoScroll">
+                <input id="autoScroll" type="checkbox" checked>
+                <span>Auto-scroll</span>
+              </label>
+              <button id="clearLog" type="button">Clear log</button>
+            </div>
+          </header>
+          <div id="logArea" class="log-area" role="log" aria-live="polite" aria-relevant="additions" tabindex="0"></div>
+        </section>
+      </div>
+    </main>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
