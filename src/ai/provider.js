@@ -15,7 +15,7 @@ class AIProviderManager {
     this.groqKeys = config.groqKeys;
     this.groqClients = new Map();
     this.nvidiaKeys = config.nvidiaKeys;
-    this.keyHealth = new Map(); // key -> { errors: 0, lastError: 0, successes: 0 }
+    this.keyHealth = new Map();
   }
 
   maskKey(key) {
@@ -53,9 +53,6 @@ class AIProviderManager {
     return Date.now() - stat.lastError < 15000 && stat.errors >= 2;
   }
 
-  /**
-   * Selects up to `count` distinct healthy Groq keys for parallel multi-key chunk generation.
-   */
   selectGroqKeys(count = 2) {
     if (!this.groqKeys || this.groqKeys.length === 0) return [];
     
@@ -69,33 +66,86 @@ class AIProviderManager {
     return [...this.groqKeys].sort(() => 0.5 - Math.random()).slice(0, Math.min(count, this.groqKeys.length));
   }
 
-  cleanJsonString(rawText) {
-    if (!rawText || typeof rawText !== 'string') return '';
+  /**
+   * Cleans and repairs JSON strings if slightly truncated or wrapped in markdown fences.
+   */
+  cleanAndParseJson(rawText) {
+    if (!rawText || typeof rawText !== 'string') {
+      throw new Error('Empty model response');
+    }
     let cleaned = rawText.trim();
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
     const startIdx = cleaned.indexOf('{');
-    const endIdx = cleaned.lastIndexOf('}');
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      cleaned = cleaned.slice(startIdx, endIdx + 1);
+    if (startIdx === -1) throw new Error('No JSON object found in response');
+    
+    let candidate = cleaned.slice(startIdx);
+    const endIdx = candidate.lastIndexOf('}');
+    if (endIdx !== -1) {
+      candidate = candidate.slice(0, endIdx + 1);
     }
-    return cleaned;
+
+    try {
+      return JSON.parse(candidate);
+    } catch (e1) {
+      // JSON Repair: close unclosed brackets / quotes
+      let repaired = candidate;
+      const openBraces = (repaired.match(/\{/g) || []).length;
+      const closeBraces = (repaired.match(/\}/g) || []).length;
+      const openBrackets = (repaired.match(/\[/g) || []).length;
+      const closeBrackets = (repaired.match(/\]/g) || []).length;
+
+      if (openBrackets > closeBrackets) {
+        repaired += ']'.repeat(openBrackets - closeBrackets);
+      }
+      if (openBraces > closeBraces) {
+        repaired += '}'.repeat(openBraces - closeBraces);
+      }
+
+      try {
+        return JSON.parse(repaired);
+      } catch (e2) {
+        throw new Error(`JSON parse error: ${e1.message}`);
+      }
+    }
   }
 
   /**
-   * Executes a completion with automatic failover across keys and models.
+   * Robust JSON execution: tries with json_object mode, falls back to raw mode on 400.
    */
-  async executeSingleJsonRequest(apiKey, model, messages, maxTokens = 2500) {
+  async executeSingleJsonRequest(apiKey, model, messages, maxTokens = 3500) {
     const client = this.getGroqClient(apiKey);
+
+    // Attempt 1: Standard Groq SDK with json_object
     if (client) {
-      const completion = await client.chat.completions.create({
-        model,
-        messages,
-        temperature: config.artifactTemperature || 0.2,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' }
-      });
-      const raw = completion.choices?.[0]?.message?.content || '';
-      return JSON.parse(this.cleanJsonString(raw));
+      try {
+        const completion = await client.chat.completions.create({
+          model,
+          messages,
+          temperature: 0.2,
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' }
+        });
+        const raw = completion.choices?.[0]?.message?.content || '';
+        return this.cleanAndParseJson(raw);
+      } catch (err) {
+        // If Groq rejects server-side JSON mode, retry in raw mode
+        if (err.message?.includes('json_validate_failed') || err.message?.includes('400')) {
+          logger.warn(`[RETRY:RAW] Retrying on key ${this.maskKey(apiKey)} without json_object mode...`);
+          const retryCompletion = await client.chat.completions.create({
+            model,
+            messages: [
+              ...messages,
+              { role: 'user', content: 'Provide the response as a single raw valid JSON object. Do not include markdown or backticks.' }
+            ],
+            temperature: 0.2,
+            max_tokens: maxTokens
+          });
+          const raw2 = retryCompletion.choices?.[0]?.message?.content || '';
+          return this.cleanAndParseJson(raw2);
+        }
+        throw err;
+      }
     }
 
     // Direct HTTP fetch fallback
@@ -108,9 +158,8 @@ class AIProviderManager {
       body: JSON.stringify({
         model,
         messages,
-        temperature: config.artifactTemperature || 0.2,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' }
+        temperature: 0.2,
+        max_tokens: maxTokens
       }),
       signal: AbortSignal.timeout(30000)
     });
@@ -122,18 +171,17 @@ class AIProviderManager {
 
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content || '';
-    return JSON.parse(this.cleanJsonString(raw));
+    return this.cleanAndParseJson(raw);
   }
 
   /**
    * DISTRIBUTED PDF GENERATION ENGINE:
-   * 1. Key 1 generates Master Outline & Theme
-   * 2. Key 1 & Key 2 (or more keys) generate Sections in parallel chunks simultaneously (Promise.all)
-   * 3. Merges chunks into cohesive publication document
+   * Splits work into 2-section chunks across parallel keys simultaneously.
    */
   async executeDistributedPdfGeneration({ prompt, quotedText = '', isOwner = false }) {
     const startTime = Date.now();
-    const totalSections = isOwner ? config.ownerMaxPages : config.normalUserMaxPages;
+    // Cap sections to 4 for normal users, 6 for owner (optimal for fast, non-truncated parallel rendering)
+    const targetSections = isOwner ? 6 : config.normalUserMaxPages;
     const keys = this.selectGroqKeys(2);
     const primaryKey = keys[0] || this.groqKeys[0];
     const secondaryKey = keys[1] || primaryKey;
@@ -143,28 +191,29 @@ class AIProviderManager {
 
     let userContext = prompt.trim();
     if (quotedText && quotedText.trim()) {
-      userContext = `[SOURCE REFERENCE MATERIAL]:\n"""\n${quotedText.trim()}\n"""\n\n[USER INSTRUCTION]:\n${userContext || 'Create a comprehensive structured document.'}`;
+      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[USER TOPIC]:\n${userContext || 'Create a comprehensive structured document.'}`;
     }
 
-    // STEP 1: MASTER OUTLINE GENERATION (Key A)
+    // STEP 1: MASTER BLUEPRINT / OUTLINE (Key A)
     logger.info(`[PARALLEL-DISTRIBUTED] Step 1: Generating Outline on Key #${this.maskKey(primaryKey)} (${modelA})`);
     const outlineMessages = [
       {
         role: 'system',
-        content: `You are a Senior Publication Architect. Create a master structural blueprint for a visual document on the user's topic.
-OUTPUT JSON ONLY:
+        content: `You are a Senior Publication Architect. Create a master structural JSON blueprint for a visual document on the user topic.
+OUTPUT STRICT JSON ONLY:
 {
-  "title": string,
+  "title": "Document Title",
   "documentType": "document" | "guide" | "report" | "summary",
   "themeColor": "editorial_clean" | "retro_pixel" | "pastel_chic" | "playful_pop" | "aurora_neon",
   "sections": [
-    { "sectionNumber": 1, "title": string, "synopsis": string },
-    { "sectionNumber": 2, "title": string, "synopsis": string },
-    ... up to ${totalSections} sections
+    { "sectionNumber": 1, "title": "Section Title 1", "synopsis": "Overview of this section" },
+    { "sectionNumber": 2, "title": "Section Title 2", "synopsis": "Overview of this section" },
+    { "sectionNumber": 3, "title": "Section Title 3", "synopsis": "Overview of this section" },
+    { "sectionNumber": 4, "title": "Section Title 4", "synopsis": "Overview of this section" }
   ]
 }`
       },
-      { role: 'user', content: userContext }
+      { role: 'user', content: `${userContext}\n\nGenerate outline with exactly ${targetSections} sections in JSON format.` }
     ];
 
     let outlineJson;
@@ -178,10 +227,10 @@ OUTPUT JSON ONLY:
 
     const plannedSections = Array.isArray(outlineJson.sections) ? outlineJson.sections : [];
     if (plannedSections.length === 0) {
-      throw new Error('Master outline failed to generate valid sections.');
+      throw new Error('Master outline failed to generate sections.');
     }
 
-    // Split sections into 2 parallel chunks (e.g. Half on Key A, Half on Key B)
+    // Split sections into 2 chunks (e.g. 2-3 sections per key)
     const midPoint = Math.ceil(plannedSections.length / 2);
     const chunk1Sections = plannedSections.slice(0, midPoint);
     const chunk2Sections = plannedSections.slice(midPoint);
@@ -190,67 +239,67 @@ OUTPUT JSON ONLY:
 • Key A [${this.maskKey(primaryKey)}]: Sections 1..${chunk1Sections.length}
 • Key B [${this.maskKey(secondaryKey)}]: Sections ${chunk1Sections.length + 1}..${plannedSections.length}`);
 
-    const buildChunkPrompt = (sectionChunk, partName) => [
+    const buildChunkPrompt = (sectionChunk, partLabel) => [
       {
         role: 'system',
-        content: `You are a Publication Section Specialist writing ${partName} for "${outlineJson.title}".
-Generate rich, complete content ONLY for these planned sections:
+        content: `You are a Publication Specialist writing ${partLabel} for "${outlineJson.title}".
+Generate rich JSON content ONLY for these planned sections:
 ${JSON.stringify(sectionChunk, null, 2)}
 
-OUTPUT JSON ONLY:
+OUTPUT STRICT JSON ONLY:
 {
   "sections": [
     {
-      "title": string,
+      "title": "Section Title",
       "subsections": [
         {
-          "title": string,
-          "paragraphs": string[],
-          "cards": [ { "title": string, "content": string, "variant": "info"|"warning"|"success"|"quote"|"neutral" } ],
-          "kpis": [ { "value": string, "label": string, "change"?: string } ],
-          "tables": [ { "headers": string[], "rows": string[][] } ]
+          "title": "Subsection Heading",
+          "paragraphs": [ "Detailed descriptive paragraph 1", "Detailed descriptive paragraph 2" ],
+          "cards": [ { "title": "Key Insight", "content": "Clear explanation", "variant": "info" } ],
+          "kpis": [ { "value": "99.9%", "label": "Reliability Metric" } ],
+          "tables": [ { "headers": ["Feature", "Description"], "rows": [["Colab GPU", "Free cloud compute"]] } ]
         }
       ]
     }
   ]
 }
-Write genuine, insightful, and comprehensive text. Do not output placeholders.`
+IMPORTANT: Write clean plain text in paragraphs. Do not use unescaped double quotes inside strings.`
       },
-      { role: 'user', content: `Write comprehensive content for sections: ${sectionChunk.map(s => s.title).join(', ')}` }
+      { role: 'user', content: `Generate JSON for sections: ${sectionChunk.map(s => s.title).join(', ')}` }
     ];
 
     // STEP 2: SIMULTANEOUS PARALLEL CHUNK GENERATION (Promise.all)
     const [part1Res, part2Res] = await Promise.all([
       (async () => {
         try {
-          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk1Sections, 'Part 1 (First Half)'), 2500);
+          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk1Sections, 'Part 1'), 3000);
           this.recordKeySuccess(primaryKey);
           return res;
         } catch (err) {
           this.recordKeyError(primaryKey, err.message);
-          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk1Sections, 'Part 1 (First Half)'), 2500);
+          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk1Sections, 'Part 1'), 3000);
         }
       })(),
       (async () => {
         try {
-          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk2Sections, 'Part 2 (Second Half)'), 2500);
+          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk2Sections, 'Part 2'), 3000);
           this.recordKeySuccess(secondaryKey);
           return res;
         } catch (err) {
           this.recordKeyError(secondaryKey, err.message);
-          return await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk2Sections, 'Part 2 (Second Half)'), 2500);
+          return await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk2Sections, 'Part 2'), 3000);
         }
       })()
     ]);
 
-    // STEP 3: ASSEMBLE ALL CHUNKS INTO FINAL DOCUMENT
+    // STEP 3: ASSEMBLE ALL CHUNKS
     const assembledSections = [
       ...(Array.isArray(part1Res.sections) ? part1Res.sections : []),
       ...(Array.isArray(part2Res.sections) ? part2Res.sections : [])
     ];
 
     const finalDoc = {
-      title: outlineJson.title || 'Document',
+      title: outlineJson.title || prompt.slice(0, 40) || 'Document',
       documentType: outlineJson.documentType || 'report',
       themeColor: outlineJson.themeColor || 'editorial_clean',
       sections: assembledSections
@@ -269,13 +318,11 @@ Write genuine, insightful, and comprehensive text. Do not output placeholders.`
 
   /**
    * DISTRIBUTED PPTX GENERATION ENGINE:
-   * 1. Key 1 generates Master Deck Blueprint (Theme + 10 Slide Titles)
-   * 2. Key 1 (Slides 1..5) and Key 2 (Slides 6..10) generate detailed slide contents simultaneously (Promise.all)
-   * 3. Merges slides into final PowerPoint deck
+   * Splits slide generation into 5-slide chunks across parallel keys simultaneously.
    */
   async executeDistributedPptxGeneration({ prompt, quotedText = '', isOwner = false }) {
     const startTime = Date.now();
-    const totalSlides = isOwner ? config.ownerMaxSlides : config.normalUserMaxSlides;
+    const targetSlides = isOwner ? 12 : config.normalUserMaxSlides;
     const keys = this.selectGroqKeys(2);
     const primaryKey = keys[0] || this.groqKeys[0];
     const secondaryKey = keys[1] || primaryKey;
@@ -285,7 +332,7 @@ Write genuine, insightful, and comprehensive text. Do not output placeholders.`
 
     let userContext = prompt.trim();
     if (quotedText && quotedText.trim()) {
-      userContext = `[SOURCE REFERENCE MATERIAL]:\n"""\n${quotedText.trim()}\n"""\n\n[USER TOPIC]:\n${userContext || 'Create an executive presentation deck.'}`;
+      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[USER TOPIC]:\n${userContext || 'Create an executive presentation deck.'}`;
     }
 
     // STEP 1: DECK BLUEPRINT (Key A)
@@ -293,19 +340,19 @@ Write genuine, insightful, and comprehensive text. Do not output placeholders.`
     const blueprintMessages = [
       {
         role: 'system',
-        content: `You are a Principal Executive Presentation Designer. Create a master slide deck blueprint for the user's topic.
-OUTPUT JSON ONLY:
+        content: `You are a Principal Executive Presentation Designer. Create a master slide deck JSON blueprint.
+OUTPUT STRICT JSON ONLY:
 {
-  "title": string,
+  "title": "Presentation Title",
   "theme": "ocean_gradient" | "dark_matter" | "emerald_growth" | "sunset_coral" | "monochrome_bold" | "corporate_navy",
   "slides": [
-    { "slideNumber": 1, "type": "title", "title": string, "synopsis": string },
-    { "slideNumber": 2, "type": "kpi_grid" | "cards" | "bullet_list" | "table" | "comparison", "title": string, "synopsis": string },
-    ... exactly ${totalSlides} slides total
+    { "slideNumber": 1, "type": "title", "title": "Deck Title", "synopsis": "Opening" },
+    { "slideNumber": 2, "type": "cards", "title": "Key Pillars", "synopsis": "Overview" }
+    ... up to ${targetSlides} slides total
   ]
 }`
       },
-      { role: 'user', content: userContext }
+      { role: 'user', content: `${userContext}\n\nGenerate blueprint with exactly ${targetSlides} slides in JSON format.` }
     ];
 
     let blueprintJson;
@@ -319,10 +366,10 @@ OUTPUT JSON ONLY:
 
     const plannedSlides = Array.isArray(blueprintJson.slides) ? blueprintJson.slides : [];
     if (plannedSlides.length === 0) {
-      throw new Error('Master presentation blueprint failed to generate valid slides.');
+      throw new Error('Master presentation blueprint failed to generate slides.');
     }
 
-    // Split slides into 2 parallel chunks (e.g. Slides 1..5 on Key A, Slides 6..10 on Key B)
+    // Split slides into 2 parallel chunks (e.g. 5-6 slides per key)
     const midPoint = Math.ceil(plannedSlides.length / 2);
     const chunk1Slides = plannedSlides.slice(0, midPoint);
     const chunk2Slides = plannedSlides.slice(midPoint);
@@ -331,62 +378,62 @@ OUTPUT JSON ONLY:
 • Key A [${this.maskKey(primaryKey)}]: Slides 1..${chunk1Slides.length}
 • Key B [${this.maskKey(secondaryKey)}]: Slides ${chunk1Slides.length + 1}..${plannedSlides.length}`);
 
-    const buildSlideChunkPrompt = (slideChunk, partName) => [
+    const buildSlideChunkPrompt = (slideChunk, partLabel) => [
       {
         role: 'system',
-        content: `You are a Presentation Specialist writing ${partName} for "${blueprintJson.title}".
+        content: `You are a Presentation Specialist writing ${partLabel} for "${blueprintJson.title}".
 Generate rich detailed slides ONLY for these planned slides:
 ${JSON.stringify(slideChunk, null, 2)}
 
-OUTPUT JSON ONLY:
+OUTPUT STRICT JSON ONLY:
 {
   "slides": [
     // Array of slide objects matching their types:
-    // - type: "title" -> { type: "title", title: string, subtitle?: string }
-    // - type: "cards" -> { type: "cards", title: string, cards: [{ title: string, description: string, badge?: string }] }
-    // - type: "kpi_grid" -> { type: "kpi_grid", title: string, kpis: [{ value: string, label: string, change?: string }] }
-    // - type: "bullet_list" -> { type: "bullet_list", title: string, items: string[] }
-    // - type: "table" -> { type: "table", title: string, headers: string[], rows: string[][] }
-    // - type: "comparison" -> { type: "comparison", title: string, left: { title: string, points: string[] }, right: { title: string, points: string[] } }
+    // - type: "title" -> { "type": "title", "title": string, "subtitle"?: string }
+    // - type: "cards" -> { "type": "cards", "title": string, "cards": [{ "title": string, "description": string }] }
+    // - type: "kpi_grid" -> { "type": "kpi_grid", "title": string, "kpis": [{ "value": string, "label": string }] }
+    // - type: "bullet_list" -> { "type": "bullet_list", "title": string, "items": string[] }
+    // - type: "table" -> { "type": "table", "title": string, "headers": string[], "rows": string[][] }
+    // - type: "comparison" -> { "type": "comparison", "title": string, "left": { "title": string, "points": string[] }, "right": { "title": string, "points": string[] } }
   ]
 }
-Provide rich, high-density professional presentation content. Never output placeholders.`
+IMPORTANT: Write clean professional text. Do not use unescaped double quotes inside strings.`
       },
-      { role: 'user', content: `Generate detailed slides for: ${slideChunk.map(s => `${s.slideNumber}. ${s.title}`).join(', ')}` }
+      { role: 'user', content: `Generate JSON for slides: ${slideChunk.map(s => `${s.slideNumber}. ${s.title}`).join(', ')}` }
     ];
 
     // STEP 2: SIMULTANEOUS PARALLEL CHUNK GENERATION (Promise.all)
     const [part1Res, part2Res] = await Promise.all([
       (async () => {
         try {
-          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk1Slides, 'Part 1 (Slides 1 to ' + chunk1Slides.length + ')'), 2500);
+          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk1Slides, 'Part 1'), 3000);
           this.recordKeySuccess(primaryKey);
           return res;
         } catch (err) {
           this.recordKeyError(primaryKey, err.message);
-          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk1Slides, 'Part 1'), 2500);
+          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk1Slides, 'Part 1'), 3000);
         }
       })(),
       (async () => {
         try {
-          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk2Slides, 'Part 2 (Slides ' + (chunk1Slides.length + 1) + ' to ' + plannedSlides.length + ')'), 2500);
+          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk2Slides, 'Part 2'), 3000);
           this.recordKeySuccess(secondaryKey);
           return res;
         } catch (err) {
           this.recordKeyError(secondaryKey, err.message);
-          return await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk2Slides, 'Part 2'), 2500);
+          return await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk2Slides, 'Part 2'), 3000);
         }
       })()
     ]);
 
-    // STEP 3: ASSEMBLE ALL SLIDES INTO FINAL PRESENTATION
+    // STEP 3: ASSEMBLE ALL SLIDES
     const assembledSlides = [
       ...(Array.isArray(part1Res.slides) ? part1Res.slides : []),
       ...(Array.isArray(part2Res.slides) ? part2Res.slides : [])
     ];
 
     const finalDeck = {
-      title: blueprintJson.title || 'Presentation',
+      title: blueprintJson.title || prompt.slice(0, 40) || 'Presentation',
       theme: blueprintJson.theme || 'ocean_gradient',
       slides: assembledSlides
     };
