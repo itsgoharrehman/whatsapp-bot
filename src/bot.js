@@ -231,9 +231,7 @@ class WhatsAppBotEngine extends EventEmitter {
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
     if (!this.sock) return false;
     try {
-      // In Groups, quoting ensures Signal group keys & multi-user clarity.
-      // In DMs (especially @lid), omit quoted contextInfo so WhatsApp mobile renders the reply directly in the 1-on-1 thread.
-      const options = isGroup && originalMsg ? { quoted: originalMsg } : {};
+      const options = originalMsg ? { quoted: originalMsg } : {};
       const res = await this.sock.sendMessage(chatJid, content, options);
       if (res?.key?.id) {
         const msgId = res.key.id;
