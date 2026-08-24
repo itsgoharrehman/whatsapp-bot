@@ -346,6 +346,24 @@ class WhatsAppBotEngine extends EventEmitter {
 
       const isGroup = permissionChecker.isGroup(chatJid);
 
+      // Resolve Phone Number JID for 1-on-1 DMs so messages are delivered directly into the recipient's phone chat
+      let targetJid = chatJid;
+      if (!isGroup) {
+        if (m.key?.senderPn) {
+          const pn = m.key.senderPn.split('@')[0].split(':')[0];
+          if (/^\d+$/.test(pn)) targetJid = `${pn}@s.whatsapp.net`;
+        } else if (m.key?.participantPn) {
+          const pn = m.key.participantPn.split('@')[0].split(':')[0];
+          if (/^\d+$/.test(pn)) targetJid = `${pn}@s.whatsapp.net`;
+        } else if (m.participant && !m.participant.endsWith('@lid')) {
+          const pn = m.participant.split('@')[0].split(':')[0];
+          if (/^\d+$/.test(pn)) targetJid = `${pn}@s.whatsapp.net`;
+        } else if (m.key?.participant && !m.key.participant.endsWith('@lid')) {
+          const pn = m.key.participant.split('@')[0].split(':')[0];
+          if (/^\d+$/.test(pn)) targetJid = `${pn}@s.whatsapp.net`;
+        }
+      }
+
       // In group chats: the bot MUST NEVER reply to its own messages or fromMe messages
       if (isGroup && isBotSelf) {
         return;
@@ -370,8 +388,8 @@ class WhatsAppBotEngine extends EventEmitter {
       if (trimmedText.startsWith('/')) {
         const commandResponse = await adminCommands.handleCommand(trimmedText, senderJid, isFromMe, botContext);
         if (commandResponse) {
-          logger.info(`[COMMAND] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Command: "${trimmedText}" | Status: EXECUTED`);
-          await this.dispatchMessage(chatJid, { text: commandResponse }, isGroup, m);
+          logger.info(`[COMMAND] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Target: ${targetJid} | Sender: ${senderLabel} (${senderJid}) | Command: "${trimmedText}" | Status: EXECUTED`);
+          await this.dispatchMessage(targetJid, { text: commandResponse }, isGroup, m);
           return;
         }
       }
@@ -408,16 +426,16 @@ class WhatsAppBotEngine extends EventEmitter {
 
         // If skill was invoked without prompt and without quoted text, guide the user
         if (!skillPrompt.trim()) {
-          await this.dispatchMessage(chatJid, {
+          await this.dispatchMessage(targetJid, {
             text: `Please specify a topic for the ${resolvedSkill.skillName.toUpperCase()} skill. Example:\n*@mark(${resolvedSkill.skillName}) Project overview and timeline*`
           }, isGroup, m);
           return;
         }
 
-        logger.info(`[SKILL] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid || 'me'}) | Skill: "${resolvedSkill.skillName.toUpperCase()}" | Prompt: "${skillPrompt.substring(0, 100)}"${quotedText ? ' [Quoted Context]' : ''}`);
+        logger.info(`[SKILL] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Target: ${targetJid} | Sender: ${senderLabel} (${senderJid || 'me'}) | Skill: "${resolvedSkill.skillName.toUpperCase()}" | Prompt: "${skillPrompt.substring(0, 100)}"${quotedText ? ' [Quoted Context]' : ''}`);
 
         // Apply human typing delay
-        await antiBan.applyHumanDelay(this.sock, chatJid);
+        await antiBan.applyHumanDelay(this.sock, targetJid);
 
         try {
           const skillContext = {
@@ -425,7 +443,7 @@ class WhatsAppBotEngine extends EventEmitter {
             quotedText: quotedText || '',
             senderJid,
             isOwner,
-            chatJid,
+            chatJid: targetJid,
             isGroup,
             rawMessage: messageText,
             m
@@ -434,7 +452,7 @@ class WhatsAppBotEngine extends EventEmitter {
           const skillResult = await resolvedSkill.skill.execute(skillContext);
 
           if (skillResult && skillResult.type === 'document' && skillResult.content) {
-            const sent = await this.dispatchMessage(chatJid, {
+            const sent = await this.dispatchMessage(targetJid, {
               document: skillResult.content,
               mimetype: skillResult.mimetype || 'application/pdf',
               fileName: skillResult.filename || 'document.pdf',
@@ -445,25 +463,25 @@ class WhatsAppBotEngine extends EventEmitter {
               db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
               db.addMessage(chatJid, 'assistant', `[Sent Document: ${skillResult.filename || 'document.pdf'}]`, this.botJid, false);
               antiBan.recordReply(chatJid);
-              logger.info(`[SKILL:DISPATCH] Target: ${chatJid} | Document: ${skillResult.filename} | Status: DELIVERED`);
+              logger.info(`[SKILL:DISPATCH] Target: ${targetJid} | Document: ${skillResult.filename} | Status: DELIVERED`);
             }
             return;
           } else if (skillResult && (skillResult.type === 'text' || typeof skillResult === 'string')) {
             const textContent = typeof skillResult === 'string' ? skillResult : skillResult.content;
             if (textContent && textContent.trim()) {
-              const sent = await this.dispatchMessage(chatJid, { text: textContent.trim() }, isGroup, m);
+              const sent = await this.dispatchMessage(targetJid, { text: textContent.trim() }, isGroup, m);
               if (sent) {
                 db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
                 db.addMessage(chatJid, 'assistant', textContent.trim(), this.botJid, false);
                 antiBan.recordReply(chatJid);
-                logger.info(`[SKILL:DISPATCH] Target: ${chatJid} | Status: DELIVERED`);
+                logger.info(`[SKILL:DISPATCH] Target: ${targetJid} | Status: DELIVERED`);
               }
               return;
             }
           }
         } catch (skillErr) {
           logger.error(`[SKILL:ERROR] Failed executing skill '${resolvedSkill.skillName}':`, skillErr.stack || skillErr.message);
-          await this.dispatchMessage(chatJid, { text: `Sorry, there was an issue generating your ${resolvedSkill.skillName.toUpperCase()} document. Please try again with a slightly different prompt!` }, isGroup, m);
+          await this.dispatchMessage(targetJid, { text: `Sorry, there was an issue generating your ${resolvedSkill.skillName.toUpperCase()} document. Please try again with a slightly different prompt!` }, isGroup, m);
           return;
         }
       }
@@ -480,7 +498,7 @@ class WhatsAppBotEngine extends EventEmitter {
       if (!db.getAutoReply()) return;
       if (!antiBan.checkRateLimit(chatJid)) return;
 
-      logger.info(`[INPUT] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid || 'me'}) | Prompt: "${messageText.substring(0, 100)}"${hasMedia ? ` [Media: ${mediaType}]` : ''}`);
+      logger.info(`[INPUT] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Target: ${targetJid} | Sender: ${senderLabel} (${senderJid || 'me'}) | Prompt: "${messageText.substring(0, 100)}"${hasMedia ? ` [Media: ${mediaType}]` : ''}`);
 
       const history = db.getConversationHistory(chatJid);
 
@@ -514,20 +532,20 @@ class WhatsAppBotEngine extends EventEmitter {
         // Graceful error if media was present but download completely failed
         if (!mediaBase64 && (mediaType === 'image' || mediaType === 'audio' || mediaType === 'voice')) {
           logger.warn(`[MEDIA] Media download failed for ${mediaType} from ${senderJid}. Sending user notification.`);
-          await this.dispatchMessage(chatJid, { text: `Sorry, WhatsApp couldn't download that ${mediaType === 'image' ? 'image' : 'audio message'}. Please try sending it again!` }, isGroup, m);
+          await this.dispatchMessage(targetJid, { text: `Sorry, WhatsApp couldn't download that ${mediaType === 'image' ? 'image' : 'audio message'}. Please try sending it again!` }, isGroup, m);
           return;
         }
       }
 
       // Apply silent pause followed by typing animation
-      await antiBan.applyHumanDelay(this.sock, chatJid);
+      await antiBan.applyHumanDelay(this.sock, targetJid);
 
       // Generate AI response from active AI Provider (NVIDIA / Groq)
       let aiReply = '';
       try {
         aiReply = await aiProvider.generateResponse(promptToSend || messageText, history, {
           messageId: msgId,
-          chatId: chatJid,
+          chatId: targetJid,
           isOwner: isOwner,
           isMedia: hasMedia,
           mediaType: mediaType,
@@ -535,21 +553,21 @@ class WhatsAppBotEngine extends EventEmitter {
           mediaMimeType: mediaMimeType
         });
       } catch (aiErr) {
-        logger.error(`AI generation error for ${chatJid}:`, aiErr.message);
+        logger.error(`AI generation error for ${targetJid}:`, aiErr.message);
       }
 
       // Only dispatch and store if a valid, non-empty user-facing reply was generated
       if (this.sock && aiReply && typeof aiReply === 'string' && aiReply.trim()) {
         const validatedReply = aiReply.trim();
-        const sent = await this.dispatchMessage(chatJid, { text: validatedReply }, isGroup, m);
+        const sent = await this.dispatchMessage(targetJid, { text: validatedReply }, isGroup, m);
         if (sent) {
           db.addMessage(chatJid, 'user', messageText, senderJid, isOwner);
           db.addMessage(chatJid, 'assistant', validatedReply, this.botJid, false);
           antiBan.recordReply(chatJid);
-          logger.info(`[DISPATCH] Target: ${chatJid} | Status: DELIVERED`);
+          logger.info(`[DISPATCH] Target: ${targetJid} | Status: DELIVERED`);
         }
       } else {
-        logger.warn(`No valid user-facing AI reply generated for ${chatJid}. Conversation history left unchanged.`);
+        logger.warn(`No valid user-facing AI reply generated for ${targetJid}. Conversation history left unchanged.`);
       }
 
     } catch (err) {
