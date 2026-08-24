@@ -125,10 +125,14 @@ class WhatsAppBotEngine extends EventEmitter {
           keys: authKeys
         },
         logger: pinoLogger,
-        browser: ['Mark Zuckerberg', 'Chrome', '1.0.0'],
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        emitOwnEvents: true,
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
         markOnlineOnConnect: true,
+        shouldSyncHistoryMessage: () => true,
+        retryRequestDelayMs: 250,
+        maxMsgRetryCount: 5,
         getMessage: async (key) => {
           if (!key) return undefined;
           const msgId = key.id;
