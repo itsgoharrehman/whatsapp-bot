@@ -10,12 +10,13 @@ import permissionChecker from './utils/permissionChecker.js';
 import adminCommands from './commands/admin.js';
 import { skillResolver, skillLoader } from './skills/index.js';
 
-let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, QRCode, pino;
+let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, QRCode, pino;
 
 try {
   const baileys = await import('@whiskeysockets/baileys');
   makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket || baileys;
   useMultiFileAuthState = baileys.useMultiFileAuthState || baileys.default?.useMultiFileAuthState;
+  makeCacheableSignalKeyStore = baileys.makeCacheableSignalKeyStore || baileys.default?.makeCacheableSignalKeyStore;
   DisconnectReason = baileys.DisconnectReason || baileys.default?.DisconnectReason;
   fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || baileys.default?.fetchLatestBaileysVersion;
   downloadMediaMessage = baileys.downloadMediaMessage || baileys.default?.downloadMediaMessage;
@@ -78,6 +79,7 @@ class WhatsAppBotEngine extends EventEmitter {
     this.startTime = Math.floor(Date.now() / 1000);
     this.sentBotMsgIds = new BoundedTtlSet(3000, 60 * 60 * 1000);
     this.processedInboundMsgIds = new BoundedTtlSet(3000, 30 * 60 * 1000);
+    this.msgRetryStore = new Map();
     this.reconnectTimer = null;
   }
 
@@ -110,12 +112,31 @@ class WhatsAppBotEngine extends EventEmitter {
     try {
       const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
       const { version } = await fetchLatestBaileysVersion();
+      const pinoLogger = pino ? pino({ level: 'silent' }) : undefined;
+
+      const authKeys = makeCacheableSignalKeyStore && pinoLogger
+        ? makeCacheableSignalKeyStore(state.keys, pinoLogger)
+        : state.keys;
 
       this.sock = makeWASocket({
         version,
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        browser: ['Mark Zuckerberg', 'Chrome', '1.0.0']
+        auth: {
+          creds: state.creds,
+          keys: authKeys
+        },
+        logger: pinoLogger,
+        browser: ['Mark Zuckerberg', 'Chrome', '1.0.0'],
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false,
+        markOnlineOnConnect: true,
+        getMessage: async (key) => {
+          if (!key) return undefined;
+          const msgId = key.id;
+          const compoundKey = `${key.remoteJid}:${key.id}`;
+          const stored = this.msgRetryStore.get(compoundKey) || this.msgRetryStore.get(msgId);
+          if (stored) return stored;
+          return { conversation: 'Mark Zuckerberg Assistant' };
+        }
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -206,17 +227,30 @@ class WhatsAppBotEngine extends EventEmitter {
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
     if (!this.sock) return false;
     try {
-      const options = isGroup && originalMsg ? { quoted: originalMsg } : {};
+      // In WhatsApp Multi-Device, always quoting originalMsg ensures Signal participant pre-keys
+      // are properly exchanged with the recipient's phone (solves "Waiting for this message")
+      const options = originalMsg ? { quoted: originalMsg } : {};
       const res = await this.sock.sendMessage(chatJid, content, options);
       if (res?.key?.id) {
-        this.sentBotMsgIds.add(res.key.id);
-        this.sentBotMsgIds.add(`${chatJid}:${res.key.id}`);
-        this.processedInboundMsgIds.add(res.key.id);
-        this.processedInboundMsgIds.add(`${chatJid}:${res.key.id}`);
+        const msgId = res.key.id;
+        const compoundKey = `${chatJid}:${msgId}`;
+        this.sentBotMsgIds.add(msgId);
+        this.sentBotMsgIds.add(compoundKey);
+        this.processedInboundMsgIds.add(msgId);
+        this.processedInboundMsgIds.add(compoundKey);
+
+        if (res.message) {
+          this.msgRetryStore.set(msgId, res.message);
+          this.msgRetryStore.set(compoundKey, res.message);
+          if (this.msgRetryStore.size > 2000) {
+            const firstKey = this.msgRetryStore.keys().next().value;
+            this.msgRetryStore.delete(firstKey);
+          }
+        }
       }
       return true;
     } catch (err) {
-      logger.error(`Send message to ${chatJid} failed:`, err.message);
+      logger.error(`[DISPATCH:ERROR] Send message to ${chatJid} failed: ${err.message}`);
       return false;
     }
   }
@@ -231,6 +265,12 @@ class WhatsAppBotEngine extends EventEmitter {
 
       if (!msgId || !chatJid) return;
       if (permissionChecker.isBroadcastOrNewsletter(chatJid)) return;
+
+      // Store in retry cache for WhatsApp Signal pre-key resend requests
+      if (m.message) {
+        this.msgRetryStore.set(msgId, m.message);
+        this.msgRetryStore.set(`${chatJid}:${msgId}`, m.message);
+      }
 
       // 1. Message Timestamp & Stale Message / Sync Catch-up Filter
       const rawTs = m.messageTimestamp;

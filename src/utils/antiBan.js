@@ -51,13 +51,13 @@ class AntiBanManager {
    * 2. Active typing animation (3-5 seconds)
    */
   async applyHumanDelay(sock, jid) {
-    const totalMinMs = config.antiBanMinDelayMs || 5000;
-    const totalMaxMs = config.antiBanMaxDelayMs || 8000;
+    const totalMinMs = config.antiBanMinDelayMs || 1500;
+    const totalMaxMs = config.antiBanMaxDelayMs || 3000;
     const totalDelay = Math.floor(Math.random() * (totalMaxMs - totalMinMs + 1)) + totalMinMs;
 
-    // Phase 1: Silent thinking phase (2 seconds)
-    const silentMs = 2000;
-    const typingMs = Math.max(totalDelay - silentMs, 2000);
+    // Phase 1: Silent thinking phase (800ms)
+    const silentMs = 800;
+    const typingMs = Math.max(totalDelay - silentMs, 1000);
 
     logger.info(`[ANTI-BAN] Chat: ${jid} | Sequence: ${silentMs}ms pause -> ${typingMs}ms typing simulation`);
 
@@ -71,6 +71,13 @@ class AntiBanManager {
     } catch (err) {}
 
     await new Promise(resolve => setTimeout(resolve, typingMs));
+
+    // Phase 3: Pause presence so typing indicator never stays stuck
+    try {
+      if (sock && typeof sock.sendPresenceUpdate === 'function') {
+        await sock.sendPresenceUpdate('paused', jid);
+      }
+    } catch (err) {}
   }
 }
 

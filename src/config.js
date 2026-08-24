@@ -120,9 +120,9 @@ export const config = {
 
   defaultProvider: (process.env.DEFAULT_PROVIDER || 'nvidia').toLowerCase(),
 
-  antiBanMinDelayMs: parseInt(process.env.ANTI_BAN_MIN_DELAY_MS || '5000', 10),
-  antiBanMaxDelayMs: parseInt(process.env.ANTI_BAN_MAX_DELAY_MS || '8000', 10),
-  rateLimitMaxPerMinute: parseInt(process.env.RATE_LIMIT_MAX_PER_MINUTE || '2', 10),
+  antiBanMinDelayMs: parseInt(process.env.ANTI_BAN_MIN_DELAY_MS || '1500', 10),
+  antiBanMaxDelayMs: parseInt(process.env.ANTI_BAN_MAX_DELAY_MS || '3000', 10),
+  rateLimitMaxPerMinute: parseInt(process.env.RATE_LIMIT_MAX_PER_MINUTE || '15', 10),
   autoReplyEnabled: process.env.AUTO_REPLY_ENABLED === 'false' ? false : true,
   sessionDir: path.resolve(ROOT_DIR, process.env.SESSION_DIR || './auth_info_baileys'),
   dbFilePath: path.resolve(ROOT_DIR, process.env.DB_FILE_PATH || './db.json'),
