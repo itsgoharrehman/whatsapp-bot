@@ -112,7 +112,9 @@ class WhatsAppBotEngine extends EventEmitter {
     try {
       const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
       const { version } = await fetchLatestBaileysVersion();
-      const pinoLogger = pino ? pino({ level: 'silent' }) : undefined;
+      const pinoLogger = pino ? pino({
+        level: 'warn'
+      }) : undefined;
 
       const authKeys = makeCacheableSignalKeyStore && pinoLogger
         ? makeCacheableSignalKeyStore(state.keys, pinoLogger)
