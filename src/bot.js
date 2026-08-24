@@ -245,6 +245,7 @@ class WhatsAppBotEngine extends EventEmitter {
             this.msgRetryStore.delete(firstKey);
           }
         }
+        logger.info(`[DISPATCH] Sent ${isGroup ? 'GROUP' : 'DM'} message to ${chatJid} (ID: ${msgId})`);
       }
       return true;
     } catch (err) {
