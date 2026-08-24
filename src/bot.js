@@ -144,19 +144,16 @@ class WhatsAppBotEngine extends EventEmitter {
         },
         logger: pinoLogger,
         browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        emitOwnEvents: true,
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
         markOnlineOnConnect: true,
-        shouldSyncHistoryMessage: () => true,
-        retryRequestDelayMs: 250,
-        maxMsgRetryCount: 5,
+        shouldSyncHistoryMessage: () => false,
+        fireInitQueries: false,
         getMessage: async (key) => {
           if (!key) return undefined;
           const msgId = key.id;
           const compoundKey = `${key.remoteJid}:${key.id}`;
           const stored = this.msgRetryStore.get(compoundKey) || this.msgRetryStore.get(msgId);
-          logger.info(`[RETRY:STORE] Queried key: ${compoundKey} | Found: ${Boolean(stored)}`);
           if (stored) return stored;
           return { conversation: 'Mark Zuckerberg Assistant' };
         }
