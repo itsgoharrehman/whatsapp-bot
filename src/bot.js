@@ -10,7 +10,7 @@ import permissionChecker from './utils/permissionChecker.js';
 import adminCommands from './commands/admin.js';
 import { skillResolver, skillLoader } from './skills/index.js';
 
-let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, generateWAMessage, QRCode, pino;
+let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, generateWAMessage, encodeSignedDeviceIdentity, QRCode, pino;
 
 try {
   const baileys = await import('@whiskeysockets/baileys');
@@ -21,6 +21,7 @@ try {
   fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || baileys.default?.fetchLatestBaileysVersion;
   downloadMediaMessage = baileys.downloadMediaMessage || baileys.default?.downloadMediaMessage;
   generateWAMessage = baileys.generateWAMessage || baileys.default?.generateWAMessage;
+  encodeSignedDeviceIdentity = baileys.encodeSignedDeviceIdentity || baileys.default?.encodeSignedDeviceIdentity;
 
   const qrMod = await import('qrcode');
   QRCode = qrMod.default?.default || qrMod.default || qrMod;
@@ -275,12 +276,28 @@ class WhatsAppBotEngine extends EventEmitter {
           quoted: originalMsg || undefined
         });
         const additionalAttributes = {};
+        const additionalNodes = [];
+
         if (chatJid.endsWith('@lid')) {
           additionalAttributes.addressing_mode = 'lid';
         }
+
+        if (this.sock.authState?.creds?.account && typeof encodeSignedDeviceIdentity === 'function') {
+          try {
+            additionalNodes.push({
+              tag: 'device-identity',
+              attrs: {},
+              content: encodeSignedDeviceIdentity(this.sock.authState.creds.account, true)
+            });
+          } catch (devErr) {
+            logger.warn(`Device identity encoding warning: ${devErr.message}`);
+          }
+        }
+
         await this.sock.relayMessage(chatJid, fullMsg.message, {
           messageId: fullMsg.key.id,
-          additionalAttributes
+          additionalAttributes,
+          additionalNodes
         });
         res = fullMsg;
       } else {
