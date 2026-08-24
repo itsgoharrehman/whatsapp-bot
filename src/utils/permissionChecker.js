@@ -11,7 +11,6 @@ export default {
     if (message.viewOnceMessageV2) message = message.viewOnceMessageV2.message;
     if (message.documentWithCaptionMessage) message = message.documentWithCaptionMessage.message;
     if (message.editedMessage) message = message.editedMessage.message?.protocolMessage?.editedMessage || message;
-    if (message.deviceSentMessage) message = message.deviceSentMessage.message;
 
     return message;
   },

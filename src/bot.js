@@ -10,18 +10,15 @@ import permissionChecker from './utils/permissionChecker.js';
 import adminCommands from './commands/admin.js';
 import { skillResolver, skillLoader } from './skills/index.js';
 
-let makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, generateWAMessage, encodeSignedDeviceIdentity, QRCode, pino;
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, QRCode, pino;
 
 try {
   const baileys = await import('@whiskeysockets/baileys');
   makeWASocket = baileys.default?.default || baileys.default || baileys.makeWASocket || baileys;
   useMultiFileAuthState = baileys.useMultiFileAuthState || baileys.default?.useMultiFileAuthState;
-  makeCacheableSignalKeyStore = baileys.makeCacheableSignalKeyStore || baileys.default?.makeCacheableSignalKeyStore;
   DisconnectReason = baileys.DisconnectReason || baileys.default?.DisconnectReason;
   fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || baileys.default?.fetchLatestBaileysVersion;
   downloadMediaMessage = baileys.downloadMediaMessage || baileys.default?.downloadMediaMessage;
-  generateWAMessage = baileys.generateWAMessage || baileys.default?.generateWAMessage;
-  encodeSignedDeviceIdentity = baileys.encodeSignedDeviceIdentity || baileys.default?.encodeSignedDeviceIdentity;
 
   const qrMod = await import('qrcode');
   QRCode = qrMod.default?.default || qrMod.default || qrMod;
@@ -81,7 +78,6 @@ class WhatsAppBotEngine extends EventEmitter {
     this.startTime = Math.floor(Date.now() / 1000);
     this.sentBotMsgIds = new BoundedTtlSet(3000, 60 * 60 * 1000);
     this.processedInboundMsgIds = new BoundedTtlSet(3000, 30 * 60 * 1000);
-    this.msgRetryStore = new Map();
     this.reconnectTimer = null;
   }
 
@@ -114,51 +110,12 @@ class WhatsAppBotEngine extends EventEmitter {
     try {
       const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
       const { version } = await fetchLatestBaileysVersion();
-      const pinoLogger = pino ? pino({
-        level: 'debug'
-      }, {
-        write: (str) => {
-          try {
-            const parsed = JSON.parse(str);
-            const msg = parsed.msg || JSON.stringify(parsed);
-            if (parsed.level >= 50) {
-              logger.error(`[BAILEYS:ERR] ${msg}`);
-            } else if (parsed.level >= 40) {
-              logger.warn(`[BAILEYS:WARN] ${msg}`);
-            } else if (msg.includes('error') || msg.includes('fail') || msg.includes('retry') || msg.includes('session') || msg.includes('send') || msg.includes('receipt')) {
-              logger.info(`[BAILEYS:DEBUG] ${msg}`);
-            }
-          } catch {
-            if (str.trim()) logger.debug(`[BAILEYS] ${str.trim()}`);
-          }
-        }
-      }) : undefined;
-
-      const authKeys = makeCacheableSignalKeyStore && pinoLogger
-        ? makeCacheableSignalKeyStore(state.keys, pinoLogger)
-        : state.keys;
 
       this.sock = makeWASocket({
         version,
-        auth: {
-          creds: state.creds,
-          keys: authKeys
-        },
-        logger: pinoLogger,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        generateHighQualityLinkPreview: false,
-        syncFullHistory: false,
-        markOnlineOnConnect: true,
-        shouldSyncHistoryMessage: () => false,
-        fireInitQueries: false,
-        getMessage: async (key) => {
-          if (!key) return undefined;
-          const msgId = key.id;
-          const compoundKey = `${key.remoteJid}:${key.id}`;
-          const stored = this.msgRetryStore.get(compoundKey) || this.msgRetryStore.get(msgId);
-          if (stored) return stored;
-          return { conversation: 'Mark Zuckerberg Assistant' };
-        }
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: ['Mark Zuckerberg', 'Chrome', '1.0.0']
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -188,8 +145,6 @@ class WhatsAppBotEngine extends EventEmitter {
         }
 
         if (connection === 'close') {
-          const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.message;
-          logger.warn(`[SYSTEM] WhatsApp connection closed. Reason: ${reason}`);
           this.qrCodeDataUrl = null;
           this.status = 'DISCONNECTED';
           this.emit('status', this.status);
@@ -204,25 +159,12 @@ class WhatsAppBotEngine extends EventEmitter {
         if (m.type !== 'notify' || !Array.isArray(m.messages)) return;
         m.messages.forEach(msg => {
           this.handleIncomingMessage(msg).catch(err => {
-            logger.error(`[MSG:HANDLER:ERROR] Unhandled error in message handler: ${err.message}\n${err.stack}`);
+            logger.error('Unhandled message error:', err.message);
           });
         });
       });
 
-      this.sock.ev.on('messages.update', (updates) => {
-        for (const update of updates) {
-          logger.info(`[MSG:UPDATE] ID: ${update.key?.id} | Remote: ${update.key?.remoteJid} | Status: ${update.update?.status || 'UNKNOWN'}`);
-        }
-      });
-
-      this.sock.ev.on('message-receipt.update', (receipts) => {
-        for (const r of receipts) {
-          logger.info(`[MSG:RECEIPT] ID: ${r.key?.id} | Remote: ${r.key?.remoteJid} | User: ${r.receipt?.userJid || 'PRIMARY'}`);
-        }
-      });
-
     } catch (err) {
-      logger.error(`[SOCKET:INIT:ERROR] Failed initializing WhatsApp socket: ${err.message}\n${err.stack}`);
       this.status = 'DISCONNECTED';
       this.emit('status', this.status);
     }
@@ -262,73 +204,19 @@ class WhatsAppBotEngine extends EventEmitter {
    * Dispatches message safely with exactly ONE send call and records sent IDs immediately.
    */
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
-    if (!this.sock) {
-      logger.error(`[DISPATCH:FAIL] Socket is not connected. Target: ${chatJid}`);
-      return false;
-    }
+    if (!this.sock) return false;
     try {
-      logger.info(`[DISPATCH:START] Target: ${chatJid} | isGroup: ${isGroup} | HasQuoted: ${Boolean(originalMsg)}`);
-      
-      let res;
-      if (typeof generateWAMessage === 'function' && typeof this.sock.relayMessage === 'function') {
-        const fullMsg = await generateWAMessage(chatJid, content, {
-          userJid: this.sock.user?.id,
-          quoted: originalMsg || undefined
-        });
-        const additionalAttributes = {};
-        const additionalNodes = [];
-
-        if (chatJid.endsWith('@lid')) {
-          additionalAttributes.addressing_mode = 'lid';
-        }
-
-        if (this.sock.authState?.creds?.account && typeof encodeSignedDeviceIdentity === 'function') {
-          try {
-            additionalNodes.push({
-              tag: 'device-identity',
-              attrs: {},
-              content: encodeSignedDeviceIdentity(this.sock.authState.creds.account, true)
-            });
-          } catch (devErr) {
-            logger.warn(`Device identity encoding warning: ${devErr.message}`);
-          }
-        }
-
-        await this.sock.relayMessage(chatJid, fullMsg.message, {
-          messageId: fullMsg.key.id,
-          additionalAttributes,
-          additionalNodes
-        });
-        res = fullMsg;
-      } else {
-        const options = originalMsg ? { quoted: originalMsg } : {};
-        res = await this.sock.sendMessage(chatJid, content, options);
-      }
-
+      const options = isGroup && originalMsg ? { quoted: originalMsg } : {};
+      const res = await this.sock.sendMessage(chatJid, content, options);
       if (res?.key?.id) {
-        const msgId = res.key.id;
-        const compoundKey = `${chatJid}:${msgId}`;
-        this.sentBotMsgIds.add(msgId);
-        this.sentBotMsgIds.add(compoundKey);
-
-        if (res.message) {
-          this.msgRetryStore.set(msgId, res.message);
-          this.msgRetryStore.set(compoundKey, res.message);
-          if (this.msgRetryStore.size > 2000) {
-            const firstKey = this.msgRetryStore.keys().next().value;
-            this.msgRetryStore.delete(firstKey);
-          }
-        }
-        logger.info(`[DISPATCH:SUCCESS] Sent ${isGroup ? 'GROUP' : 'DM'} to ${chatJid} | MsgID: ${msgId}`);
-      } else {
-        logger.warn(`[DISPATCH:EMPTY] dispatch returned no message ID for ${chatJid}`);
+        this.sentBotMsgIds.add(res.key.id);
+        this.sentBotMsgIds.add(`${chatJid}:${res.key.id}`);
+        this.processedInboundMsgIds.add(res.key.id);
+        this.processedInboundMsgIds.add(`${chatJid}:${res.key.id}`);
       }
       return true;
     } catch (err) {
-      logger.error(`[DISPATCH:ERROR] Send message to ${chatJid} failed: ${err.message}\n${err.stack}`);
-      if (err.data) {
-        logger.error(`[DISPATCH:ERROR:DATA] ${JSON.stringify(err.data)}`);
-      }
+      logger.error(`Send message to ${chatJid} failed:`, err.message);
       return false;
     }
   }
@@ -344,12 +232,6 @@ class WhatsAppBotEngine extends EventEmitter {
       if (!msgId || !chatJid) return;
       if (permissionChecker.isBroadcastOrNewsletter(chatJid)) return;
 
-      // Store in retry cache for WhatsApp Signal pre-key resend requests
-      if (m.message) {
-        this.msgRetryStore.set(msgId, m.message);
-        this.msgRetryStore.set(`${chatJid}:${msgId}`, m.message);
-      }
-
       // 1. Message Timestamp & Stale Message / Sync Catch-up Filter
       const rawTs = m.messageTimestamp;
       const msgTimestamp = typeof rawTs === 'object' && rawTs !== null
@@ -358,12 +240,12 @@ class WhatsAppBotEngine extends EventEmitter {
 
       if (msgTimestamp && !isNaN(msgTimestamp) && msgTimestamp > 0) {
         const nowSec = Math.floor(Date.now() / 1000);
-        // Allow generous grace period of 120s for start time to prevent dropping valid messages on restart
-        if (this.startTime && msgTimestamp < (this.startTime - 120)) {
+        // Drop any message sent before current bot engine instance started (with 10s grace period)
+        if (this.startTime && msgTimestamp < (this.startTime - 10)) {
           return;
         }
-        // Drop messages older than 10 minutes (600s)
-        if (nowSec - msgTimestamp > 600) {
+        // Drop any message older than 180 seconds from current clock
+        if (nowSec - msgTimestamp > 180) {
           return;
         }
       }
