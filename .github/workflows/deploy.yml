@@ -12,18 +12,18 @@ jobs:
       - name: Deploy via SSH to alwaysdata
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ssh-itsgoharrehman.alwaysdata.net
+          host: ssh-whatsappbot.alwaysdata.net
           username: ${{ secrets.ALWAYSDATA_SSH_USER }}
           password: ${{ secrets.ALWAYSDATA_SSH_PASSWORD }}
           port: 22
           timeout: 60s
           command_timeout: 10m
           script: |
-            cd /home/itsgoharrehman/whatsapp-bot
+            cd /home/whatsappbot/whatsapp-bot
             git pull origin main
-            npm install --omit=dev
+            NODE_OPTIONS="--max-old-space-size=128" npm install --omit=dev --no-audit --no-fund --maxsockets=1
             
-            # Safely kill old bot processes without killing this SSH session
+            # Safely kill old bot processes to trigger auto-restart
             MY_PID=$$
             for pid in $(pgrep -f "src/index.js"); do
               if [ "$pid" != "$MY_PID" ]; then

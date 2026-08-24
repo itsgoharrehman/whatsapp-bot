@@ -1,15 +1,61 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 import { botEngine } from './bot.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, '..');
+const FRONTEND_DIR = path.join(ROOT_DIR, 'frontend');
+
 let express = null;
-try { express = (await import('express')).default; } catch (err) {}
+try {
+  const mod = await import('express');
+  express = mod.default || mod;
+} catch (err) {
+  logger.warn(`Express not loaded, running fallback HTTP server: ${err.message}`);
+}
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon'
+};
+
+function serveStaticFile(req, res, pathname) {
+  let safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
+  if (safePath === '/' || safePath === '' || safePath === '\\') {
+    safePath = '/index.html';
+  }
+
+  let filePath = path.join(FRONTEND_DIR, safePath);
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    filePath = path.join(FRONTEND_DIR, 'index.html');
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('404 Not Found');
+    }
+    res.writeHead(200, { 'Content-Type': contentType });
+    res.end(data);
+  });
+}
 
 export function createServer() {
-  const ROOT_DIR = process.cwd();
   if (express) {
     const app = express();
     app.use(express.json());
@@ -26,7 +72,7 @@ export function createServer() {
       next();
     });
 
-    app.use(express.static(path.join(ROOT_DIR, 'frontend')));
+    app.use(express.static(FRONTEND_DIR));
 
     app.get('/api/status', (req, res) => res.json(botEngine.getStatus()));
     app.get('/api/logs', (req, res) => res.json(logger.getHistory()));
@@ -69,10 +115,11 @@ export function createServer() {
       res.json({ success: true, message: 'Session reset. Generating new QR code...' });
     });
 
-    app.get('*', (req, res) => res.sendFile(path.join(ROOT_DIR, 'frontend', 'index.html')));
+    app.get('*', (req, res) => res.sendFile(path.join(FRONTEND_DIR, 'index.html')));
     return app;
   }
 
+  // Native HTTP Fallback Server
   return http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const secret = config.dashboardSecret || process.env.DASHBOARD_SECRET;
@@ -98,13 +145,38 @@ export function createServer() {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, message: 'Logs cleared.' }));
     }
+    if (url.pathname === '/api/logs/stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      res.write(`data: ${JSON.stringify({ type: 'history', logs: logger.getHistory() })}\n\n`);
+
+      const logHandler = (logEntry) => {
+        res.write(`data: ${JSON.stringify({ type: 'log', log: logEntry })}\n\n`);
+      };
+      const clearHandler = () => {
+        res.write(`data: ${JSON.stringify({ type: 'cleared' })}\n\n`);
+      };
+
+      logger.on('log', logHandler);
+      logger.on('cleared', clearHandler);
+      req.on('close', () => {
+        logger.off('log', logHandler);
+        logger.off('cleared', clearHandler);
+      });
+      return;
+    }
     if (url.pathname === '/api/control/reset_session' && req.method === 'POST') {
       botEngine.resetSession().then(() => setTimeout(() => botEngine.start(true), 1000));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, message: 'Session reset.' }));
     }
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Mark Zuckerberg Assistant Server');
+
+    // Serve Frontend Static UI
+    serveStaticFile(req, res, url.pathname);
   });
 }
 
