@@ -19,6 +19,7 @@ class ArtifactDatabase {
     this.data = {
       quotas: {},
       vips: [],
+      identities: {},
       analytics: {
         totalArtifactsGenerated: 0,
         totalPdfsGenerated: 0,
@@ -41,6 +42,7 @@ class ArtifactDatabase {
         this.data = {
           quotas: parsed.quotas || {},
           vips: Array.isArray(parsed.vips) ? parsed.vips : [],
+          identities: parsed.identities || {},
           analytics: {
             totalArtifactsGenerated: parsed.analytics?.totalArtifactsGenerated || 0,
             totalPdfsGenerated: parsed.analytics?.totalPdfsGenerated || 0,
@@ -57,7 +59,6 @@ class ArtifactDatabase {
         this.save();
       }
     } catch (err) {
-      logger.error('Database load error, initialized fresh structure:', err.message);
       this.save();
     }
   }
@@ -87,31 +88,111 @@ class ArtifactDatabase {
           try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (__) {}
         }
       }
-    } catch (err) {
-      logger.error('Error saving database:', err.message);
-    }
+    } catch (err) {}
   }
 
   normalizeJid(jid) {
     if (!jid || typeof jid !== 'string') return '';
-    return jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    let num = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    // Normalize Pakistani mobile format (03xx... -> 923xx...)
+    if (num.startsWith('03') && num.length === 11) {
+      num = '92' + num.slice(1);
+    }
+    return num;
+  }
+
+  registerIdentity(phoneOrJid, lidOrJid) {
+    if (!phoneOrJid || !lidOrJid) return;
+    const phone = this.normalizeJid(phoneOrJid);
+    const lid = this.normalizeJid(lidOrJid);
+    if (!phone || !lid || phone === lid) return;
+
+    if (!this.data.identities) this.data.identities = {};
+    let changed = false;
+    if (this.data.identities[lid] !== phone) {
+      this.data.identities[lid] = phone;
+      changed = true;
+    }
+    if (this.data.identities[phone] !== lid) {
+      this.data.identities[phone] = lid;
+      changed = true;
+    }
+
+    // If one is VIP, link the other automatically
+    if (this.isVip(phone) && !this.data.vips.includes(lid)) {
+      this.data.vips.push(lid);
+      changed = true;
+    } else if (this.isVip(lid) && !this.data.vips.includes(phone)) {
+      this.data.vips.push(phone);
+      changed = true;
+    }
+
+    if (changed) {
+      this.save();
+    }
+  }
+
+  getAssociatedIdentities(jidOrPhone) {
+    const raw = this.normalizeJid(jidOrPhone);
+    const results = new Set([raw]);
+    if (!this.data.identities) return Array.from(results);
+
+    const mapped = this.data.identities[raw];
+    if (mapped) results.add(mapped);
+    return Array.from(results);
+  }
+
+  resolveDisplayPhone(jidOrPhone) {
+    const raw = this.normalizeJid(jidOrPhone);
+    if (this.data.identities && this.data.identities[raw]) {
+      const mapped = this.data.identities[raw];
+      if (raw.length >= 14 && mapped.length <= 13) return mapped;
+    }
+    return raw;
   }
 
   isVip(jidOrPhone) {
     if (!jidOrPhone) return false;
-    const num = this.normalizeJid(jidOrPhone);
-    if (!num) return false;
-    // Check direct normalized number match or partial matches
-    return this.data.vips.some(v => v === num || num.endsWith(v) || v.endsWith(num));
+    const candidates = this.getAssociatedIdentities(jidOrPhone);
+
+    return candidates.some(candidate => {
+      const num = this.normalizeJid(candidate);
+      if (!num) return false;
+      return this.data.vips.some(v => {
+        const normV = this.normalizeJid(v);
+        if (normV === num || v === num) return true;
+        if (num.length >= 9 && normV.length >= 9 && num.length <= 13 && normV.length <= 13) {
+          return num.slice(-9) === normV.slice(-9);
+        }
+        return false;
+      });
+    });
   }
 
   setVip(jidOrPhone, isVip = true) {
     const num = this.normalizeJid(jidOrPhone);
     if (!num) return false;
-    if (isVip && !this.data.vips.includes(num)) {
-      this.data.vips.push(num);
-    } else if (!isVip) {
-      this.data.vips = this.data.vips.filter(v => v !== num && !num.endsWith(v) && !v.endsWith(num));
+
+    const candidates = this.getAssociatedIdentities(num);
+
+    if (isVip) {
+      candidates.forEach(c => {
+        if (!this.data.vips.includes(c)) {
+          this.data.vips.push(c);
+        }
+      });
+    } else {
+      this.data.vips = this.data.vips.filter(v => {
+        const normV = this.normalizeJid(v);
+        return !candidates.some(c => {
+          const normC = this.normalizeJid(c);
+          if (normV === normC || v === normC) return true;
+          if (normC.length >= 9 && normV.length >= 9 && normC.length <= 13 && normV.length <= 13) {
+            return normC.slice(-9) === normV.slice(-9);
+          }
+          return false;
+        });
+      });
     }
     this.save();
     return true;
@@ -125,8 +206,8 @@ class ArtifactDatabase {
    * Checks daily generation quota and exact role for a user.
    */
   checkUserQuota(userJid, isOwner = false) {
-    const userPhone = this.normalizeJid(userJid);
-    const isVipUser = this.isVip(userPhone) || this.isVip(userJid);
+    const displayPhone = this.resolveDisplayPhone(userJid);
+    const isVipUser = this.isVip(userJid) || this.isVip(displayPhone);
 
     if (isOwner) {
       return {
@@ -142,7 +223,7 @@ class ArtifactDatabase {
 
     if (isVipUser) {
       return {
-        role: 'VIP',
+        role: 'VIP User',
         allowed: true,
         isUnlimited: true,
         remaining: Infinity,
@@ -153,7 +234,7 @@ class ArtifactDatabase {
     }
 
     const today = getTodayString();
-    let record = this.data.quotas[userPhone];
+    let record = this.data.quotas[displayPhone] || this.data.quotas[this.normalizeJid(userJid)];
 
     if (!record || record.date !== today) {
       record = {
@@ -163,7 +244,7 @@ class ArtifactDatabase {
         pptCount: 0,
         lastUsed: 0
       };
-      this.data.quotas[userPhone] = record;
+      this.data.quotas[displayPhone] = record;
     }
 
     const limit = config.dailyUserLimit || 10;
@@ -172,7 +253,7 @@ class ArtifactDatabase {
     const allowed = used < limit;
 
     return {
-      role: 'STANDARD',
+      role: 'Standard User',
       allowed,
       isUnlimited: false,
       remaining,
@@ -195,15 +276,15 @@ class ArtifactDatabase {
       keyUsed = ''
     } = metadata;
 
-    const userPhone = this.normalizeJid(userJid);
+    const displayPhone = this.resolveDisplayPhone(userJid);
     const today = getTodayString();
     this.checkGlobalDateRollover();
 
     // Update user quota
-    if (!this.data.quotas[userPhone] || this.data.quotas[userPhone].date !== today) {
-      this.data.quotas[userPhone] = { date: today, total: 0, pdfCount: 0, pptCount: 0, lastUsed: 0 };
+    if (!this.data.quotas[displayPhone] || this.data.quotas[displayPhone].date !== today) {
+      this.data.quotas[displayPhone] = { date: today, total: 0, pdfCount: 0, pptCount: 0, lastUsed: 0 };
     }
-    const userRecord = this.data.quotas[userPhone];
+    const userRecord = this.data.quotas[displayPhone];
     userRecord.total = (userRecord.total || 0) + 1;
     if (type === 'pdf') {
       userRecord.pdfCount = (userRecord.pdfCount || 0) + 1;
@@ -236,7 +317,6 @@ class ArtifactDatabase {
       a.keyUsageStats[keyUsed] = (a.keyUsageStats[keyUsed] || 0) + 1;
     }
 
-    // Add to recent activity log
     this.data.recentGenerations.unshift({
       id: `gen_${Date.now()}`,
       type,
@@ -244,7 +324,7 @@ class ArtifactDatabase {
       pagesOrSlides,
       latencyMs,
       modelUsed,
-      userPhone: userPhone ? `${userPhone.slice(0, 4)}***${userPhone.slice(-3)}` : 'Unknown',
+      userPhone: displayPhone ? `${displayPhone.slice(0, 4)}***${displayPhone.slice(-3)}` : 'Unknown',
       isOwner: Boolean(isOwner),
       timestamp: new Date().toISOString()
     });
@@ -254,22 +334,6 @@ class ArtifactDatabase {
     }
 
     this.save();
-  }
-
-  resetUserQuota(jidOrPhone) {
-    const userPhone = this.normalizeJid(jidOrPhone);
-    if (this.data.quotas[userPhone]) {
-      delete this.data.quotas[userPhone];
-      this.save();
-      return true;
-    }
-    return false;
-  }
-
-  resetAllQuotas() {
-    this.data.quotas = {};
-    this.save();
-    return true;
   }
 
   getAnalytics() {

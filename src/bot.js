@@ -199,6 +199,20 @@ class WhatsAppArtifactEngine extends EventEmitter {
     this.emit('status', this.status);
   }
 
+  async syncGroupIdentities(chatJid) {
+    if (!this.sock || !permissionChecker.isGroup(chatJid)) return;
+    try {
+      const metadata = await this.sock.groupMetadata(chatJid);
+      if (metadata && Array.isArray(metadata.participants)) {
+        for (const p of metadata.participants) {
+          if (p.id && p.lid) {
+            db.registerIdentity(p.id, p.lid);
+          }
+        }
+      }
+    } catch (err) {}
+  }
+
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
     if (!this.sock) return false;
     try {
@@ -227,6 +241,11 @@ class WhatsAppArtifactEngine extends EventEmitter {
 
       if (!msgId || !chatJid) return;
       if (permissionChecker.isBroadcastOrNewsletter(chatJid)) return;
+
+      const isGroup = permissionChecker.isGroup(chatJid);
+      if (isGroup) {
+        this.syncGroupIdentities(chatJid).catch(() => {});
+      }
 
       // Drop stale messages (> 180s or before bot boot)
       const rawTs = m.messageTimestamp;
@@ -259,7 +278,6 @@ class WhatsAppArtifactEngine extends EventEmitter {
         return;
       }
 
-      const isGroup = permissionChecker.isGroup(chatJid);
       const botContext = { botJid: this.botJid, botLid: this.botLid };
       const isOwner = isFromMe || adminCommands.isOwner(senderJid, isFromMe, botContext);
       const senderLabel = isOwner ? 'OWNER' : 'USER';
@@ -280,9 +298,8 @@ class WhatsAppArtifactEngine extends EventEmitter {
         // Quota Check
         const quota = db.checkUserQuota(senderJid, isOwner);
         if (!quota.allowed) {
-          logger.warn(`[QUOTA:REJECTED] User ${senderJid} exceeded daily limit (${quota.used}/${quota.limit})`);
           await this.dispatchMessage(chatJid, {
-            text: `⚠️ *Daily Limit Reached* (${quota.used}/${quota.limit} used today)\n• Your quota resets in ~${quota.resetInHours}h (00:00 UTC).\n• Contact the bot owner to request VIP access!`
+            text: `*Daily Limit Reached* (${quota.used}/${quota.limit} used today)\n• Resets in ~${quota.resetInHours}h (00:00 UTC).\n• Contact the bot owner for VIP access.`
           }, isGroup, m);
           return;
         }
@@ -290,7 +307,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
         // Anti-Spam Rate Limit
         if (!isOwner && !antiBan.checkRateLimit(senderJid)) {
           await this.dispatchMessage(chatJid, {
-            text: `⏳ *Cooldown Active* — Please wait a few seconds before requesting another generation.`
+            text: `*Cooldown Active* - Please wait a few seconds before requesting another generation.`
           }, isGroup, m);
           return;
         }
@@ -302,12 +319,12 @@ class WhatsAppArtifactEngine extends EventEmitter {
         if (!skillPrompt.trim()) {
           const cmdName = resolvedSkill.skillName === 'pptx' ? 'ppt' : resolvedSkill.skillName;
           await this.dispatchMessage(chatJid, {
-            text: `*Usage:* \`/${cmdName} <topic or title>\`\n*Example:* \`/${cmdName} Artificial Intelligence in 2026\`\n\n_Tip: You can also reply to any message with /${cmdName} to convert that message!_`
+            text: `*Usage:* \`/${cmdName} <topic> [--theme=<name>]\`\n*Example:* \`/${cmdName} Artificial Intelligence\`\n*Themes:* Type \`/themes\` to view all visual themes.`
           }, isGroup, m);
           return;
         }
 
-        logger.info(`[ARTIFACT:START] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Type: ${resolvedSkill.skillName.toUpperCase()} | Prompt: "${skillPrompt.substring(0, 80)}"`);
+        logger.info(`[${resolvedSkill.skillName.toUpperCase()}] Processing "${skillPrompt.substring(0, 50)}" from ${senderLabel}`);
 
         // Typing indicator
         await antiBan.applyHumanDelay(this.sock, chatJid);
@@ -322,9 +339,10 @@ class WhatsAppArtifactEngine extends EventEmitter {
             isGroup
           });
 
-          if (skillResult && skillResult.buffer) {
+          const docBuffer = skillResult?.buffer || skillResult?.content;
+          if (skillResult && docBuffer) {
             const sent = await this.dispatchMessage(chatJid, {
-              document: skillResult.buffer,
+              document: docBuffer,
               mimetype: skillResult.mimetype || (resolvedSkill.skillName === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/pdf'),
               fileName: skillResult.filename || `artifact.${resolvedSkill.skillName === 'pptx' ? 'pptx' : 'pdf'}`,
               caption: skillResult.caption || `Generated ${resolvedSkill.skillName.toUpperCase()}`
@@ -340,22 +358,22 @@ class WhatsAppArtifactEngine extends EventEmitter {
                 keyUsed: skillResult.keyUsed || ''
               });
               antiBan.recordReply(chatJid);
-              logger.info(`[ARTIFACT:DELIVERED] ${skillResult.filename} dispatched successfully to ${chatJid}`);
+              logger.info(`[${resolvedSkill.skillName.toUpperCase()}] Sent ${skillResult.filename} -> ${isGroup ? 'Group' : 'DM'}`);
             }
           }
         } catch (skillErr) {
-          logger.error(`[ARTIFACT:ERROR] Generation failed:`, skillErr.stack || skillErr.message);
+          logger.error(`[${resolvedSkill.skillName.toUpperCase()}] Generation failed: ${skillErr.message}`);
           await this.dispatchMessage(chatJid, {
-            text: `❌ *Generation Error*: Could not generate ${resolvedSkill.skillName.toUpperCase()} at this moment. Please try again with a slightly different prompt!`
+            text: `*Generation Error*: Could not generate ${resolvedSkill.skillName.toUpperCase()} at this moment. Please try again with a different prompt.`
           }, isGroup, m);
         }
         return;
       }
 
-      // 2. Handle Utility & Admin Commands (/help, /usage, /limit, /status, /stats, /keys, etc.)
-      const commandResponse = await adminCommands.handleCommand(trimmedText, senderJid, isFromMe, botContext);
+      // 2. Handle Utility & Admin Commands (/help, /themes, /usage, /vip, /unvip, /vips, /status)
+      const commandResponse = await adminCommands.handleCommand(trimmedText, senderJid, isFromMe, botContext, m);
       if (commandResponse) {
-        logger.info(`[COMMAND] Source: ${isGroup ? 'GROUP' : 'DM'} (${chatJid}) | Sender: ${senderLabel} (${senderJid}) | Command: "${trimmedText}"`);
+        logger.info(`[COMMAND] "${trimmedText}" from ${senderLabel}`);
         await this.dispatchMessage(chatJid, { text: commandResponse }, isGroup, m);
       }
 

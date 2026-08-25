@@ -7,9 +7,6 @@ export class PDFGenerator {
     const { prompt = '', quotedText = '', isOwner = false } = context;
     const startTime = Date.now();
 
-    logger.info(`[PDF:DISTRIBUTED] Launching multi-key distributed generation | Topic: "${prompt.substring(0, 80)}" | Tier: ${isOwner ? 'OWNER (Unlimited)' : 'STANDARD (Max 4 Pages)'}`);
-
-    // Run distributed generation across multiple keys in parallel
     const result = await aiProvider.executeDistributedPdfGeneration({
       prompt,
       quotedText,
@@ -21,7 +18,6 @@ export class PDFGenerator {
       docJson.title = prompt.slice(0, 40) || 'Document';
     }
 
-    // Render the vector PDF via PDFRenderer
     const renderedBuffer = await PDFRenderer.render(docJson);
     const totalLatency = Date.now() - startTime;
 
@@ -31,18 +27,17 @@ export class PDFGenerator {
       .slice(0, 50);
 
     const validBuffer = Buffer.isBuffer(renderedBuffer) ? renderedBuffer : (renderedBuffer?.buffer || Buffer.from(renderedBuffer));
-
-    logger.info(`[PDF:SUCCESS] Generated "${docJson.title}" buffer size: ${validBuffer.length} bytes`);
+    logger.info(`[PDF] "${docJson.title}" (${docJson.themeColor || 'editorial_clean'}) compiled in ${(totalLatency / 1000).toFixed(1)}s`);
 
     return {
       buffer: validBuffer,
       filename: `${safeTitle}.pdf`,
       title: docJson.title,
-      caption: `📄 Generated Document: *${docJson.title}*\n⚡ _Synthesized in ${(totalLatency / 1000).toFixed(1)}s across parallel keys [${result.keyUsed}]_`,
+      caption: `*${docJson.title}*\nGenerated in ${(totalLatency / 1000).toFixed(1)}s`,
       pageCount: docJson.sections?.length || 1,
       latencyMs: totalLatency,
       modelUsed: result.modelUsed,
-      keyUsed: result.keyUsed
+      keyUsed: result.provider || ''
     };
   }
 }

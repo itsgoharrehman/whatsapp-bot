@@ -56,6 +56,32 @@ export default {
     return this.extractMessageText(quotedUnwrapped);
   },
 
+  extractQuotedSender(rawMessage) {
+    const unwrapped = this.unwrapMessage(rawMessage);
+    if (!unwrapped) return null;
+    const contextInfo =
+      unwrapped.extendedTextMessage?.contextInfo ||
+      unwrapped.imageMessage?.contextInfo ||
+      unwrapped.videoMessage?.contextInfo ||
+      unwrapped.audioMessage?.contextInfo ||
+      unwrapped.documentMessage?.contextInfo;
+
+    return contextInfo?.participant || null;
+  },
+
+  extractMentions(rawMessage) {
+    const unwrapped = this.unwrapMessage(rawMessage);
+    if (!unwrapped) return [];
+    const contextInfo =
+      unwrapped.extendedTextMessage?.contextInfo ||
+      unwrapped.imageMessage?.contextInfo ||
+      unwrapped.videoMessage?.contextInfo ||
+      unwrapped.audioMessage?.contextInfo ||
+      unwrapped.documentMessage?.contextInfo;
+
+    return Array.isArray(contextInfo?.mentionedJid) ? contextInfo.mentionedJid : [];
+  },
+
   async hasGroupWritePermission() {
     return true;
   }

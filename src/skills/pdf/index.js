@@ -20,12 +20,17 @@ export const pdfSkill = {
     const result = await PDFGenerator.generate(context);
     return {
       type: 'document',
+      buffer: result.buffer,
       content: result.buffer,
       filename: result.filename,
       mimetype: 'application/pdf',
       caption: result.caption,
       title: result.title,
-      documentType: result.documentType
+      documentType: result.documentType,
+      pageCount: result.pageCount,
+      latencyMs: result.latencyMs,
+      modelUsed: result.modelUsed,
+      keyUsed: result.keyUsed
     };
   }
 };

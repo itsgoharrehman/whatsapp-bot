@@ -6,16 +6,49 @@ let GroqSDK = null;
 try {
   const mod = await import('groq-sdk');
   GroqSDK = mod.default?.default || mod.default || mod.Groq || mod;
-} catch (err) {
-  logger.error(`[CRITICAL] Error importing groq-sdk: ${err.message}`);
-}
+} catch (err) {}
+
+export const VALID_PDF_THEMES = [
+  'editorial_clean',
+  'retro_pixel',
+  'pastel_chic',
+  'playful_pop',
+  'aurora_neon'
+];
+
+export const VALID_PPTX_THEMES = [
+  'modern_minimal',
+  'tech_indigo',
+  'corporate_blue',
+  'dark_slate',
+  'emerald_growth',
+  'crimson_bold',
+  'sunset_amber',
+  'cyberpunk',
+  'academic_navy',
+  'purple_luxury'
+];
 
 class AIProviderManager {
   constructor() {
-    this.groqKeys = config.groqKeys;
+    this.groqKeys = config.groqKeys || [];
     this.groqClients = new Map();
-    this.nvidiaKeys = config.nvidiaKeys;
+    this.nvidiaKeys = config.nvidiaKeys || [];
     this.keyHealth = new Map();
+    this.activeProvider = (config.defaultProvider || 'groq').toLowerCase();
+  }
+
+  setProvider(provider) {
+    const p = String(provider).toLowerCase().trim();
+    if (p === 'groq' || p === 'nvidia') {
+      this.activeProvider = p;
+      return true;
+    }
+    return false;
+  }
+
+  getProvider() {
+    return this.activeProvider;
   }
 
   maskKey(key) {
@@ -44,18 +77,16 @@ class AIProviderManager {
     stat.errors += 1;
     stat.lastError = Date.now();
     this.keyHealth.set(key, stat);
-    logger.warn(`Key error [${this.maskKey(key)}]: ${errorMsg}`);
   }
 
   isKeyCoolingDown(key) {
     const stat = this.keyHealth.get(key);
     if (!stat || stat.errors === 0) return false;
-    return Date.now() - stat.lastError < 15000 && stat.errors >= 2;
+    return Date.now() - stat.lastError < 20000 && stat.errors >= 2;
   }
 
   selectGroqKeys(count = 2) {
     if (!this.groqKeys || this.groqKeys.length === 0) return [];
-    
     const available = [...this.groqKeys]
       .filter(k => !this.isKeyCoolingDown(k))
       .sort(() => 0.5 - Math.random());
@@ -66,8 +97,16 @@ class AIProviderManager {
     return [...this.groqKeys].sort(() => 0.5 - Math.random()).slice(0, Math.min(count, this.groqKeys.length));
   }
 
+  selectNvidiaKey() {
+    if (!this.nvidiaKeys || this.nvidiaKeys.length === 0) return null;
+    const available = [...this.nvidiaKeys]
+      .filter(k => !this.isKeyCoolingDown(k))
+      .sort(() => 0.5 - Math.random());
+    return available[0] || this.nvidiaKeys[0];
+  }
+
   /**
-   * Cleans and repairs JSON strings if slightly truncated or wrapped in markdown fences.
+   * Cleans and repairs JSON strings if wrapped in markdown fences or slightly truncated.
    */
   cleanAndParseJson(rawText) {
     if (!rawText || typeof rawText !== 'string') {
@@ -111,12 +150,43 @@ class AIProviderManager {
   }
 
   /**
-   * Robust JSON execution: tries with json_object mode, falls back to raw mode on 400.
+   * Executes a JSON request against NVIDIA NIM endpoints.
    */
-  async executeSingleJsonRequest(apiKey, model, messages, maxTokens = 3500) {
-    const client = this.getGroqClient(apiKey);
+  async executeNvidiaJsonRequest(apiKey, model, messages, maxTokens = 3500) {
+    const res = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: model || config.nvidiaArtifactPrimary || 'meta/llama-3.3-70b-instruct',
+        messages: [
+          ...messages,
+          { role: 'user', content: 'Respond with valid JSON only. Do not use markdown backticks or extra commentary.' }
+        ],
+        temperature: 0.2,
+        max_tokens: maxTokens,
+        response_format: { type: 'json_object' }
+      }),
+      signal: AbortSignal.timeout(30000)
+    });
 
-    // Attempt 1: Standard Groq SDK with json_object
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`NVIDIA HTTP ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content || '';
+    return this.cleanAndParseJson(raw);
+  }
+
+  /**
+   * Executes a JSON request against Groq SDK or fallback HTTP.
+   */
+  async executeGroqJsonRequest(apiKey, model, messages, maxTokens = 2500) {
+    const client = this.getGroqClient(apiKey);
     if (client) {
       try {
         const completion = await client.chat.completions.create({
@@ -129,26 +199,21 @@ class AIProviderManager {
         const raw = completion.choices?.[0]?.message?.content || '';
         return this.cleanAndParseJson(raw);
       } catch (err) {
-        // If Groq rejects server-side JSON mode, retry in raw mode
-        if (err.message?.includes('json_validate_failed') || err.message?.includes('400')) {
-          logger.warn(`[RETRY:RAW] Retrying on key ${this.maskKey(apiKey)} without json_object mode...`);
-          const retryCompletion = await client.chat.completions.create({
-            model,
-            messages: [
-              ...messages,
-              { role: 'user', content: 'Provide the response as a single raw valid JSON object. Do not include markdown or backticks.' }
-            ],
-            temperature: 0.2,
-            max_tokens: maxTokens
-          });
-          const raw2 = retryCompletion.choices?.[0]?.message?.content || '';
-          return this.cleanAndParseJson(raw2);
-        }
-        throw err;
+        // Fallback without json_object on schema error
+        const retry = await client.chat.completions.create({
+          model,
+          messages: [
+            ...messages,
+            { role: 'user', content: 'Output strict JSON only without markdown or backticks.' }
+          ],
+          temperature: 0.2,
+          max_tokens: maxTokens
+        });
+        const raw2 = retry.choices?.[0]?.message?.content || '';
+        return this.cleanAndParseJson(raw2);
       }
     }
 
-    // Direct HTTP fetch fallback
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -161,12 +226,12 @@ class AIProviderManager {
         temperature: 0.2,
         max_tokens: maxTokens
       }),
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(25000)
     });
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`HTTP ${res.status}: ${errText}`);
+      throw new Error(`Groq HTTP ${res.status}: ${errText}`);
     }
 
     const data = await res.json();
@@ -175,300 +240,437 @@ class AIProviderManager {
   }
 
   /**
-   * DISTRIBUTED PDF GENERATION ENGINE:
-   * Splits work into 2-section chunks across parallel keys simultaneously.
+   * Ironclad extraction of theme, requested pages/slides, and clean subject topic.
+   */
+  /**
+   * Universal Theme and Topic Extractor
+   * Supports --theme=<name>, --theme <name>, -t <name>, 'in <name> style', 'with <name> theme', and aliases.
+   */
+  extractThemeAndTopic(rawPrompt, type = 'pdf') {
+    if (!rawPrompt || typeof rawPrompt !== 'string') {
+      return {
+        topic: type === 'pdf' ? 'Document' : 'Presentation',
+        theme: type === 'pdf' ? 'editorial_clean' : 'modern_minimal',
+        requestedPages: null
+      };
+    }
+
+    let text = rawPrompt.trim();
+    let explicitTheme = null;
+    let requestedPages = null;
+
+    const PDF_THEME_ALIASES = {
+      retro_pixel: ['retro_pixel', 'retro', 'pixel', 'terminal', '8bit', 'arcade', 'vintage'],
+      pastel_chic: ['pastel_chic', 'pastel', 'chic', 'boutique', 'lavender', 'pink'],
+      playful_pop: ['playful_pop', 'playful', 'pop', 'candy', 'yellow', 'memphis'],
+      aurora_neon: ['aurora_neon', 'aurora', 'neon', 'glow'],
+      editorial_clean: ['editorial_clean', 'editorial', 'clean', 'bw', 'b&w', 'black_and_white', 'minimal', 'classic', 'monochrome']
+    };
+
+    const PPTX_THEME_ALIASES = {
+      modern_minimal: ['modern_minimal', 'modern', 'minimal', 'clean', 'monochrome', 'bw'],
+      tech_indigo: ['tech_indigo', 'indigo', 'tech', 'cyan', 'mint'],
+      corporate_blue: ['corporate_blue', 'corporate', 'blue', 'enterprise', 'navy'],
+      dark_slate: ['dark_slate', 'dark', 'slate', 'night'],
+      emerald_growth: ['emerald_growth', 'emerald', 'growth', 'green', 'forest', 'finance'],
+      crimson_bold: ['crimson_bold', 'crimson', 'bold', 'red', 'ruby'],
+      sunset_amber: ['sunset_amber', 'sunset', 'amber', 'orange', 'creative'],
+      cyberpunk: ['cyberpunk', 'cyber', 'neon', 'magenta', 'violet'],
+      academic_navy: ['academic_navy', 'academic', 'university', 'formal'],
+      purple_luxury: ['purple_luxury', 'luxury', 'purple', 'gold', 'royal', 'premium']
+    };
+
+    const resolveThemeFromCandidate = (candidate) => {
+      if (!candidate) return null;
+      const clean = candidate.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+      const aliasMap = type === 'pdf' ? PDF_THEME_ALIASES : PPTX_THEME_ALIASES;
+      for (const [themeName, aliases] of Object.entries(aliasMap)) {
+        if (themeName === clean || aliases.includes(clean)) {
+          return themeName;
+        }
+      }
+      return null;
+    };
+
+    // 1. Match explicit flag formats: --theme=name, --theme name, --theme+name, --theme:name, -theme name, -t name
+    const flagPatterns = [
+      /(?:--|-)?theme[-+=:\s]+([a-zA-Z0-9_]+)/i,
+      /-t[-+=:\s]+([a-zA-Z0-9_]+)/i,
+      /(?:in|with|using)\s+(?:the\s+)?([a-zA-Z0-9_]+)\s+(?:theme|style|mode)/i,
+      /\b([a-zA-Z0-9_]+)\s+(?:theme|style)\b/i
+    ];
+
+    for (const pattern of flagPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        const resolved = resolveThemeFromCandidate(match[1]);
+        if (resolved) {
+          explicitTheme = resolved;
+          text = text.replace(match[0], ' ');
+          break;
+        }
+      }
+    }
+
+    // 2. Extract requested pages/slides (e.g. "4 page", "4-page", "5 pages", "10 slides", "8 slide")
+    const pageMatch = text.match(/\b(\d+)\s*[- ]*(?:pages?|page|pgs?|pg|slides?|slide|decks?)\b/i);
+    if (pageMatch) {
+      requestedPages = parseInt(pageMatch[1], 10);
+      text = text.replace(pageMatch[0], ' ');
+    }
+
+    // 3. Iteratively strip residual theme flags, formatting commands, and noise words
+    text = text.replace(/(?:--|-)?theme[-+=:\s]*[a-zA-Z0-9_]*/gi, ' ');
+    text = text.replace(/-t[-+=:\s]*[a-zA-Z0-9_]*/gi, ' ');
+    text = text.replace(/--[a-zA-Z0-9_-]+/gi, ' ');
+
+    // Strip command prefixes (e.g. /pdf, /ppt, /pptx, /doc, pdf, ppt)
+    text = text.replace(/^\/?(?:pdf|ppt|pptx|doc|skill|presentation|report|guide)\b/gi, ' ');
+
+    // Strip action verbs (e.g. generate, create, make, build, write)
+    text = text.replace(/^(?:\s*please\s+)?(?:\s*can\s+you\s+)?(?:\s*generate|\s*create|\s*make|\s*write|\s*build|\s*produce|\s*design|\s*provide|\s*give\s+me)\s+(?:a|an|the)?\s*/gi, ' ');
+
+    // Strip format keywords (e.g. "pdf", "pitch deck", "presentation", "report")
+    text = text.replace(/\b(?:pdf|document|doc|report|guide|presentation|ppt|pptx|slides?|deck|pitch\s+deck)\b/gi, ' ');
+
+    // Strip prepositions
+    text = text.replace(/^\s*(?:about|on|for|regarding|of|in)\s+/gi, ' ');
+    text = text.replace(/\s+(?:about|on|for|regarding|of|in)\s*$/gi, ' ');
+
+    // Normalize spacing
+    text = text.replace(/\s+/g, ' ').trim();
+
+    const finalTheme = explicitTheme || (type === 'pdf' ? 'editorial_clean' : 'modern_minimal');
+    const finalTopic = text || (type === 'pdf' ? 'Document' : 'Presentation');
+
+    return { topic: finalTopic, theme: finalTheme, requestedPages };
+  }
+
+  /**
+   * PDF GENERATION ENGINE
+   * Executes distributed multi-key parallel synthesis on Groq or high-token generation on NVIDIA.
    */
   async executeDistributedPdfGeneration({ prompt, quotedText = '', isOwner = false }) {
     const startTime = Date.now();
-    // Cap sections to 4 for normal users, 6 for owner (optimal for fast, non-truncated parallel rendering)
-    const targetSections = isOwner ? 6 : config.normalUserMaxPages;
-    const keys = this.selectGroqKeys(2);
-    const primaryKey = keys[0] || this.groqKeys[0];
-    const secondaryKey = keys[1] || primaryKey;
+    const { topic, theme, requestedPages } = this.extractThemeAndTopic(prompt, 'pdf');
+    const targetSections = requestedPages
+      ? Math.max(2, Math.min(requestedPages, isOwner ? config.ownerMaxPages : config.normalUserMaxPages))
+      : (isOwner ? 6 : config.normalUserMaxPages);
 
-    const modelA = config.groqArtifactPrimary || 'openai/gpt-oss-120b';
-    const modelB = config.groqArtifactFallbacks?.[0] || 'openai/gpt-oss-20b';
-
-    let userContext = prompt.trim();
+    let userContext = `Subject Matter: "${topic}"`;
     if (quotedText && quotedText.trim()) {
-      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[USER TOPIC]:\n${userContext || 'Create a comprehensive structured document.'}`;
+      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[SUBJECT MATTER]:\n"${topic}"`;
     }
 
-    // STEP 1: MASTER BLUEPRINT / OUTLINE (Key A)
-    logger.info(`[PARALLEL-DISTRIBUTED] Step 1: Generating Outline on Key #${this.maskKey(primaryKey)} (${modelA})`);
-    const outlineMessages = [
-      {
-        role: 'system',
-        content: `You are a Senior Publication Architect. Create a master structural JSON blueprint for a visual document on the user topic.
-OUTPUT STRICT JSON ONLY:
+    // 1. Try Primary Provider (Groq or NVIDIA)
+    if (this.activeProvider === 'nvidia' && this.nvidiaKeys.length > 0) {
+      try {
+        logger.info(`[PDF] [STEP 1/3] Synthesizing "${topic}" on NVIDIA NIM...`);
+        const res = await this.generatePdfSingleShotNvidia(topic, theme, targetSections, userContext);
+        const totalLatency = Date.now() - startTime;
+        return { json: res.doc, latencyMs: totalLatency, modelUsed: res.model, provider: 'NVIDIA' };
+      } catch (nvidiaErr) {
+        logger.warn(`[PDF] NVIDIA NIM failed (${nvidiaErr.message}). Switching to Groq distributed engine...`);
+      }
+    }
+
+    // 2. Groq Multi-Key Distributed Parallel Pipeline
+    try {
+      const keys = this.selectGroqKeys(2);
+      const keyA = keys[0] || this.groqKeys[0];
+      const keyB = keys[1] || keyA;
+
+      if (!keyA) throw new Error('No Groq API keys configured');
+
+      logger.info(`[PDF] [STEP 1/3] Synthesizing blueprint for "${topic}" (${targetSections} sections)...`);
+
+      // Step 1: Master Blueprint (Key A)
+      const blueprintMessages = [
+        {
+          role: 'system',
+          content: `You are a Principal Publication Architect. Create the blueprint outline for an in-depth document on the subject matter "${topic}".
+CRITICAL: The prompt is the subject topic. DO NOT create meta-headings like "4-Page PDF" or "Creating a PDF". Every section must be an authentic domain chapter.
+Output JSON:
 {
-  "title": "Document Title",
-  "documentType": "document" | "guide" | "report" | "summary",
-  "themeColor": "editorial_clean" | "retro_pixel" | "pastel_chic" | "playful_pop" | "aurora_neon",
-  "sections": [
-    { "sectionNumber": 1, "title": "Section Title 1", "synopsis": "Overview of this section" },
-    { "sectionNumber": 2, "title": "Section Title 2", "synopsis": "Overview of this section" },
-    { "sectionNumber": 3, "title": "Section Title 3", "synopsis": "Overview of this section" },
-    { "sectionNumber": 4, "title": "Section Title 4", "synopsis": "Overview of this section" }
+  "title": "Comprehensive Subject Title",
+  "documentType": "guide",
+  "themeColor": "${theme}",
+  "sectionOutlines": [
+    { "index": 1, "title": "Real Topic Section 1 Title", "focus": "Deep architectural and operational aspects" }
   ]
 }`
-      },
-      { role: 'user', content: `${userContext}\n\nGenerate outline with exactly ${targetSections} sections in JSON format.` }
-    ];
+        },
+        { role: 'user', content: `${userContext}\n\nProvide blueprint outline with exactly ${targetSections} distinct sectionOutlines in strict JSON.` }
+      ];
 
-    let outlineJson;
-    try {
-      outlineJson = await this.executeSingleJsonRequest(primaryKey, modelA, outlineMessages, 1500);
-      this.recordKeySuccess(primaryKey);
-    } catch (err) {
-      this.recordKeyError(primaryKey, err.message);
-      outlineJson = await this.executeSingleJsonRequest(secondaryKey, modelB, outlineMessages, 1500);
-    }
+      const model = config.groqArtifactPrimary || 'openai/gpt-oss-120b';
+      const blueprintRes = await this.executeGroqJsonRequest(keyA, model, blueprintMessages, 1200);
+      this.recordKeySuccess(keyA);
 
-    const plannedSections = Array.isArray(outlineJson.sections) ? outlineJson.sections : [];
-    if (plannedSections.length === 0) {
-      throw new Error('Master outline failed to generate sections.');
-    }
+      const sectionOutlines = Array.isArray(blueprintRes.sectionOutlines) ? blueprintRes.sectionOutlines : [];
+      if (sectionOutlines.length === 0) {
+        for (let i = 1; i <= targetSections; i++) {
+          sectionOutlines.push({ index: i, title: `${topic}: Part ${i}`, focus: 'Core insights and technical details' });
+        }
+      }
 
-    // Split sections into 2 chunks (e.g. 2-3 sections per key)
-    const midPoint = Math.ceil(plannedSections.length / 2);
-    const chunk1Sections = plannedSections.slice(0, midPoint);
-    const chunk2Sections = plannedSections.slice(midPoint);
+      logger.info(`[PDF] [STEP 2/3] Synthesizing ${sectionOutlines.length} sections in parallel on 2 Groq keys...`);
 
-    logger.info(`[PARALLEL-DISTRIBUTED] Step 2: Splitting ${plannedSections.length} sections across 2 keys simultaneously:
-• Key A [${this.maskKey(primaryKey)}]: Sections 1..${chunk1Sections.length}
-• Key B [${this.maskKey(secondaryKey)}]: Sections ${chunk1Sections.length + 1}..${plannedSections.length}`);
+      // Step 2: Distributed Parallel Section Synthesis
+      const half = Math.ceil(sectionOutlines.length / 2);
+      const batchA = sectionOutlines.slice(0, half);
+      const batchB = sectionOutlines.slice(half);
 
-    const buildChunkPrompt = (sectionChunk, partLabel) => [
-      {
-        role: 'system',
-        content: `You are a Publication Specialist writing ${partLabel} for "${outlineJson.title}".
-Generate rich JSON content ONLY for these planned sections:
-${JSON.stringify(sectionChunk, null, 2)}
+      const buildSectionPrompt = (batch) => [
+        {
+          role: 'system',
+          content: `You are a Principal Technical Writer. Generate rich, publication-grade document sections in structured JSON for the subject "${topic}".
+
+CRITICAL FORMATTING REQUIREMENTS:
+Every section MUST contain diverse visual formatting elements:
+1. "heading": Section H2 title
+2. "subheading": Specific focus H3 subtitle
+3. "paragraphs": 2 descriptive, high-value paragraphs (70-100 words each)
+4. "bulletPoints": 3-4 structured key takeaways and technical points
+5. "numberedSteps": 2-3 actionable implementation steps
+6. "callout": An "important" or "tip" callout box with {"type": "important", "title": "Important Architecture Note", "text": "Crucial details and considerations"}
+7. "table": A structured comparison/specification table with {"title": "Key Metrics & Specifications", "headers": ["Component", "Specification", "Impact"], "rows": [["Runtime", "High Throughput", "Optimal"], ["Storage", "NVMe SSD", "Sub-millisecond"]]}
 
 OUTPUT STRICT JSON ONLY:
 {
   "sections": [
     {
-      "title": "Section Title",
-      "subsections": [
-        {
-          "title": "Subsection Heading",
-          "paragraphs": [ "Detailed descriptive paragraph 1", "Detailed descriptive paragraph 2" ],
-          "cards": [ { "title": "Key Insight", "content": "Clear explanation", "variant": "info" } ],
-          "kpis": [ { "value": "99.9%", "label": "Reliability Metric" } ],
-          "tables": [ { "headers": ["Feature", "Description"], "rows": [["Colab GPU", "Free cloud compute"]] } ]
-        }
-      ]
+      "heading": "Section Heading",
+      "subheading": "Subsection Title",
+      "paragraphs": [
+        "In-depth descriptive paragraph explaining concepts in full technical detail.",
+        "Second extensive paragraph detailing specific workflows and operational mechanisms."
+      ],
+      "bulletPoints": [
+        "Core Feature: In-depth technical specifications and architectural advantages.",
+        "Performance Impact: Measurable efficiency gains and real-world benchmarks."
+      ],
+      "numberedSteps": [
+        "Phase 1: Environment provisioning and dependency initialization.",
+        "Phase 2: Execution pipeline deployment and validation."
+      ],
+      "callout": {
+        "type": "important",
+        "title": "Important Architectural Note",
+        "text": "Essential best practices, security requirements, and operational warnings."
+      },
+      "table": {
+        "title": "Feature & Specification Matrix",
+        "headers": ["Feature", "Standard Tier", "Enterprise Tier"],
+        "rows": [
+          ["Compute Capacity", "Shared High-Speed Core", "Dedicated Distributed Cluster"],
+          ["Storage Volume", "100 GB Cloud Storage", "Unlimited Scalable Storage"]
+        ]
+      }
     }
   ]
-}
-IMPORTANT: Write clean plain text in paragraphs. Do not use unescaped double quotes inside strings.`
+}`
+        },
+        { role: 'user', content: `Generate sections for:\n${JSON.stringify(batch, null, 2)}` }
+      ];
+
+      const fallbackModel = config.groqArtifactFallbacks?.[0] || 'openai/gpt-oss-20b';
+
+      const [resBatchA, resBatchB] = await Promise.all([
+        this.executeGroqJsonRequest(keyA, model, buildSectionPrompt(batchA), 2600)
+          .catch(() => this.executeGroqJsonRequest(keyA, fallbackModel, buildSectionPrompt(batchA), 2600)),
+        this.executeGroqJsonRequest(keyB, model, buildSectionPrompt(batchB), 2600)
+          .catch(() => this.executeGroqJsonRequest(keyB, fallbackModel, buildSectionPrompt(batchB), 2600))
+      ]);
+
+      const sections = [
+        ...(Array.isArray(resBatchA.sections) ? resBatchA.sections : []),
+        ...(Array.isArray(resBatchB.sections) ? resBatchB.sections : [])
+      ];
+
+      logger.info(`[PDF] [STEP 3/3] Compiling vector PDF "${blueprintRes.title || topic}"...`);
+
+      const finalDoc = {
+        title: blueprintRes.title || topic,
+        documentType: blueprintRes.documentType || 'guide',
+        themeColor: theme,
+        sections: sections.length > 0 ? sections : sectionOutlines.map(o => ({
+          heading: o.title,
+          subheading: o.focus,
+          paragraphs: [`Comprehensive exploration of ${o.title} in relation to ${topic}.`]
+        }))
+      };
+
+      const totalLatency = Date.now() - startTime;
+      return {
+        json: finalDoc,
+        latencyMs: totalLatency,
+        modelUsed: `${model} + ${fallbackModel}`,
+        provider: 'Groq'
+      };
+    } catch (groqErr) {
+      // 3. Fallback to NVIDIA NIM if Groq failed
+      if (this.nvidiaKeys.length > 0) {
+        logger.warn(`[PDF] Groq engine failed (${groqErr.message}). Falling back to NVIDIA NIM...`);
+        const res = await this.generatePdfSingleShotNvidia(topic, theme, targetSections, userContext);
+        const totalLatency = Date.now() - startTime;
+        return { json: res.doc, latencyMs: totalLatency, modelUsed: res.model, provider: 'NVIDIA' };
+      }
+      throw groqErr;
+    }
+  }
+
+  async generatePdfSingleShotNvidia(topic, theme, targetSections, userContext) {
+    const nvidiaKey = this.selectNvidiaKey();
+    if (!nvidiaKey) throw new Error('No NVIDIA API keys configured');
+
+    const messages = [
+      {
+        role: 'system',
+        content: `You are a Principal Publication Architect. Generate an exhaustive document in structured JSON for the subject "${topic}".
+DO NOT create meta-headings about "4-Page PDF" or "Creating a PDF". Every section must be an authentic domain chapter.
+Every section MUST contain diverse visual formatting: "heading", "subheading", "paragraphs", "bulletPoints", "numberedSteps", "callout", and "table".
+Output JSON:
+{
+  "title": "Comprehensive Topic Title",
+  "documentType": "guide",
+  "themeColor": "${theme}",
+  "sections": [
+    {
+      "heading": "Section Heading",
+      "subheading": "Subsection Title",
+      "paragraphs": ["Detailed descriptive paragraph.", "Second informative paragraph."],
+      "bulletPoints": ["Key point 1", "Key point 2"],
+      "numberedSteps": ["Step 1", "Step 2"],
+      "callout": { "type": "important", "title": "Important Architectural Note", "text": "Crucial details and considerations" },
+      "table": { "headers": ["Feature", "Specification", "Impact"], "rows": [["Item 1", "Specification 1", "Impact 1"]] }
+    }
+  ]
+}`
       },
-      { role: 'user', content: `Generate JSON for sections: ${sectionChunk.map(s => s.title).join(', ')}` }
+      { role: 'user', content: `${userContext}\n\nGenerate document with exactly ${targetSections} sections in strict JSON.` }
     ];
 
-    // STEP 2: SIMULTANEOUS PARALLEL CHUNK GENERATION (Promise.all)
-    const [part1Res, part2Res] = await Promise.all([
-      (async () => {
-        try {
-          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk1Sections, 'Part 1'), 3000);
-          this.recordKeySuccess(primaryKey);
-          return res;
-        } catch (err) {
-          this.recordKeyError(primaryKey, err.message);
-          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk1Sections, 'Part 1'), 3000);
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildChunkPrompt(chunk2Sections, 'Part 2'), 3000);
-          this.recordKeySuccess(secondaryKey);
-          return res;
-        } catch (err) {
-          this.recordKeyError(secondaryKey, err.message);
-          return await this.executeSingleJsonRequest(primaryKey, modelA, buildChunkPrompt(chunk2Sections, 'Part 2'), 3000);
-        }
-      })()
-    ]);
-
-    // STEP 3: ASSEMBLE ALL CHUNKS
-    const assembledSections = [
-      ...(Array.isArray(part1Res.sections) ? part1Res.sections : []),
-      ...(Array.isArray(part2Res.sections) ? part2Res.sections : [])
-    ];
-
-    const finalDoc = {
-      title: outlineJson.title || prompt.slice(0, 40) || 'Document',
-      documentType: outlineJson.documentType || 'report',
-      themeColor: outlineJson.themeColor || 'editorial_clean',
-      sections: assembledSections
-    };
-
-    const totalLatency = Date.now() - startTime;
-    logger.info(`[PARALLEL-DISTRIBUTED:SUCCESS] Assembled ${assembledSections.length} sections in ${totalLatency}ms using 2 keys in parallel!`);
+    const model = config.nvidiaArtifactPrimary || 'meta/llama-3.3-70b-instruct';
+    const res = await this.executeNvidiaJsonRequest(nvidiaKey, model, messages, 3500);
+    this.recordKeySuccess(nvidiaKey);
 
     return {
-      json: finalDoc,
-      latencyMs: totalLatency,
-      modelUsed: `${modelA} + ${modelB}`,
-      keyUsed: `${this.maskKey(primaryKey)} + ${this.maskKey(secondaryKey)}`
+      doc: {
+        title: res.title || topic,
+        documentType: res.documentType || 'guide',
+        themeColor: theme,
+        sections: Array.isArray(res.sections) ? res.sections : []
+      },
+      model
     };
   }
 
   /**
-   * DISTRIBUTED PPTX GENERATION ENGINE:
-   * Splits slide generation into 5-slide chunks across parallel keys simultaneously.
+   * PPTX GENERATION ENGINE
    */
   async executeDistributedPptxGeneration({ prompt, quotedText = '', isOwner = false }) {
     const startTime = Date.now();
-    const targetSlides = isOwner ? 12 : config.normalUserMaxSlides;
-    const keys = this.selectGroqKeys(2);
-    const primaryKey = keys[0] || this.groqKeys[0];
-    const secondaryKey = keys[1] || primaryKey;
+    const { topic, theme, requestedPages } = this.extractThemeAndTopic(prompt, 'pptx');
+    const targetSlides = requestedPages
+      ? Math.max(3, Math.min(requestedPages, isOwner ? config.ownerMaxSlides : config.normalUserMaxSlides))
+      : (isOwner ? 10 : config.normalUserMaxSlides);
 
-    const modelA = config.groqArtifactPrimary || 'openai/gpt-oss-120b';
-    const modelB = config.groqArtifactFallbacks?.[0] || 'openai/gpt-oss-20b';
-
-    let userContext = prompt.trim();
+    let userContext = `Subject Matter: "${topic}"`;
     if (quotedText && quotedText.trim()) {
-      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[USER TOPIC]:\n${userContext || 'Create an executive presentation deck.'}`;
+      userContext = `[SOURCE REFERENCE]:\n"""\n${quotedText.trim()}\n"""\n\n[SUBJECT MATTER]:\n"${topic}"`;
     }
 
-    // STEP 1: DECK BLUEPRINT (Key A)
-    logger.info(`[PARALLEL-DISTRIBUTED] Step 1: Generating Presentation Blueprint on Key #${this.maskKey(primaryKey)} (${modelA})`);
-    const blueprintMessages = [
+    logger.info(`[PPTX] [STEP 1/3] Synthesizing presentation outline for "${topic}" (${targetSlides} slides)...`);
+
+    const messages = [
       {
         role: 'system',
-        content: `You are a Principal Executive Presentation Designer. Create a master slide deck JSON blueprint.
-OUTPUT STRICT JSON ONLY:
+        content: `You are a Principal Executive Presentation Designer. Generate an executive slide deck in structured JSON on the subject "${topic}".
+DO NOT create meta-slides about "Creating a presentation" or "Slide deck overview". Every slide must have an authentic domain purpose.
+Output JSON:
 {
-  "title": "Presentation Title",
-  "theme": "ocean_gradient" | "dark_matter" | "emerald_growth" | "sunset_coral" | "monochrome_bold" | "corporate_navy",
+  "title": "Executive Presentation Title",
+  "theme": "${theme}",
   "slides": [
-    { "slideNumber": 1, "type": "title", "title": "Deck Title", "synopsis": "Opening" },
-    { "slideNumber": 2, "type": "cards", "title": "Key Pillars", "synopsis": "Overview" }
-    ... up to ${targetSlides} slides total
+    { "type": "title", "title": "Deck Title", "subtitle": "Subtitle text" },
+    { "type": "cards", "title": "Strategic Pillars", "cards": [{ "title": "Pillar 1", "description": "In-depth details" }] },
+    { "type": "kpi_grid", "title": "Impact Metrics", "kpis": [{ "value": "10x", "label": "Performance Gain" }] },
+    { "type": "bullet_list", "title": "Core Capabilities", "items": ["Key capability 1", "Key capability 2"] },
+    { "type": "table", "title": "Comparison Matrix", "headers": ["Feature", "Standard", "Enterprise"], "rows": [["Compute", "Shared", "Dedicated"]] },
+    { "type": "comparison", "title": "Comparative Analysis", "left": { "title": "Option A", "points": ["Advantage 1"] }, "right": { "title": "Option B", "points": ["Advantage 2"] } }
   ]
 }`
       },
-      { role: 'user', content: `${userContext}\n\nGenerate blueprint with exactly ${targetSlides} slides in JSON format.` }
+      { role: 'user', content: `${userContext}\n\nGenerate complete slide deck with exactly ${targetSlides} slides in strict JSON.` }
     ];
 
-    let blueprintJson;
-    try {
-      blueprintJson = await this.executeSingleJsonRequest(primaryKey, modelA, blueprintMessages, 1500);
-      this.recordKeySuccess(primaryKey);
-    } catch (err) {
-      this.recordKeyError(primaryKey, err.message);
-      blueprintJson = await this.executeSingleJsonRequest(secondaryKey, modelB, blueprintMessages, 1500);
+    let presJson = null;
+    let modelUsed = '';
+    let providerUsed = '';
+
+    if (this.activeProvider === 'nvidia' && this.nvidiaKeys.length > 0) {
+      try {
+        const nKey = this.selectNvidiaKey();
+        modelUsed = config.nvidiaArtifactPrimary || 'meta/llama-3.3-70b-instruct';
+        presJson = await this.executeNvidiaJsonRequest(nKey, modelUsed, messages, 3500);
+        providerUsed = 'NVIDIA';
+      } catch (nErr) {
+        logger.warn(`[PPTX] NVIDIA failed. Falling back to Groq...`);
+      }
     }
 
-    const plannedSlides = Array.isArray(blueprintJson.slides) ? blueprintJson.slides : [];
-    if (plannedSlides.length === 0) {
-      throw new Error('Master presentation blueprint failed to generate slides.');
+    if (!presJson) {
+      const gKeys = this.selectGroqKeys(1);
+      const gKey = gKeys[0] || this.groqKeys[0];
+      if (!gKey) throw new Error('No AI provider keys available');
+      modelUsed = config.groqArtifactPrimary || 'openai/gpt-oss-120b';
+      presJson = await this.executeGroqJsonRequest(gKey, modelUsed, messages, 2800);
+      providerUsed = 'Groq';
     }
 
-    // Split slides into 2 parallel chunks (e.g. 5-6 slides per key)
-    const midPoint = Math.ceil(plannedSlides.length / 2);
-    const chunk1Slides = plannedSlides.slice(0, midPoint);
-    const chunk2Slides = plannedSlides.slice(midPoint);
-
-    logger.info(`[PARALLEL-DISTRIBUTED] Step 2: Splitting ${plannedSlides.length} slides across 2 keys simultaneously:
-• Key A [${this.maskKey(primaryKey)}]: Slides 1..${chunk1Slides.length}
-• Key B [${this.maskKey(secondaryKey)}]: Slides ${chunk1Slides.length + 1}..${plannedSlides.length}`);
-
-    const buildSlideChunkPrompt = (slideChunk, partLabel) => [
-      {
-        role: 'system',
-        content: `You are a Presentation Specialist writing ${partLabel} for "${blueprintJson.title}".
-Generate rich detailed slides ONLY for these planned slides:
-${JSON.stringify(slideChunk, null, 2)}
-
-OUTPUT STRICT JSON ONLY:
-{
-  "slides": [
-    // Array of slide objects matching their types:
-    // - type: "title" -> { "type": "title", "title": string, "subtitle"?: string }
-    // - type: "cards" -> { "type": "cards", "title": string, "cards": [{ "title": string, "description": string }] }
-    // - type: "kpi_grid" -> { "type": "kpi_grid", "title": string, "kpis": [{ "value": string, "label": string }] }
-    // - type: "bullet_list" -> { "type": "bullet_list", "title": string, "items": string[] }
-    // - type: "table" -> { "type": "table", "title": string, "headers": string[], "rows": string[][] }
-    // - type: "comparison" -> { "type": "comparison", "title": string, "left": { "title": string, "points": string[] }, "right": { "title": string, "points": string[] } }
-  ]
-}
-IMPORTANT: Write clean professional text. Do not use unescaped double quotes inside strings.`
-      },
-      { role: 'user', content: `Generate JSON for slides: ${slideChunk.map(s => `${s.slideNumber}. ${s.title}`).join(', ')}` }
-    ];
-
-    // STEP 2: SIMULTANEOUS PARALLEL CHUNK GENERATION (Promise.all)
-    const [part1Res, part2Res] = await Promise.all([
-      (async () => {
-        try {
-          const res = await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk1Slides, 'Part 1'), 3000);
-          this.recordKeySuccess(primaryKey);
-          return res;
-        } catch (err) {
-          this.recordKeyError(primaryKey, err.message);
-          return await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk1Slides, 'Part 1'), 3000);
-        }
-      })(),
-      (async () => {
-        try {
-          const res = await this.executeSingleJsonRequest(secondaryKey, modelB, buildSlideChunkPrompt(chunk2Slides, 'Part 2'), 3000);
-          this.recordKeySuccess(secondaryKey);
-          return res;
-        } catch (err) {
-          this.recordKeyError(secondaryKey, err.message);
-          return await this.executeSingleJsonRequest(primaryKey, modelA, buildSlideChunkPrompt(chunk2Slides, 'Part 2'), 3000);
-        }
-      })()
-    ]);
-
-    // STEP 3: ASSEMBLE ALL SLIDES
-    const assembledSlides = [
-      ...(Array.isArray(part1Res.slides) ? part1Res.slides : []),
-      ...(Array.isArray(part2Res.slides) ? part2Res.slides : [])
-    ];
+    logger.info(`[PPTX] [STEP 2/3] Rendering native 16:9 PowerPoint presentation...`);
 
     const finalDeck = {
-      title: blueprintJson.title || prompt.slice(0, 40) || 'Presentation',
-      theme: blueprintJson.theme || 'ocean_gradient',
-      slides: assembledSlides
+      title: presJson.title || topic || 'Presentation',
+      theme: theme,
+      slides: Array.isArray(presJson.slides) ? presJson.slides : []
     };
 
     const totalLatency = Date.now() - startTime;
-    logger.info(`[PARALLEL-DISTRIBUTED:SUCCESS] Assembled ${assembledSlides.length} slides in ${totalLatency}ms using 2 keys in parallel!`);
-
     return {
       json: finalDeck,
       latencyMs: totalLatency,
-      modelUsed: `${modelA} + ${modelB}`,
-      keyUsed: `${this.maskKey(primaryKey)} + ${this.maskKey(secondaryKey)}`
+      modelUsed,
+      provider: providerUsed
     };
   }
 
   getStatus() {
-    const keysReport = this.groqKeys.map((k, i) => {
-      const h = this.keyHealth.get(k) || { errors: 0, successes: 0 };
-      return {
-        index: i + 1,
-        masked: this.maskKey(k),
-        status: this.isKeyCoolingDown(k) ? 'COOLDOWN' : 'ACTIVE',
-        successes: h.successes,
-        errors: h.errors
-      };
-    });
+    const groqReport = this.groqKeys.map((k, i) => ({
+      index: i + 1,
+      masked: this.maskKey(k),
+      status: this.isKeyCoolingDown(k) ? 'COOLDOWN' : 'ACTIVE',
+      successes: this.keyHealth.get(k)?.successes || 0,
+      errors: this.keyHealth.get(k)?.errors || 0
+    }));
+
+    const nvidiaReport = this.nvidiaKeys.map((k, i) => ({
+      index: i + 1,
+      masked: this.maskKey(k),
+      status: this.isKeyCoolingDown(k) ? 'COOLDOWN' : 'ACTIVE',
+      successes: this.keyHealth.get(k)?.successes || 0,
+      errors: this.keyHealth.get(k)?.errors || 0
+    }));
 
     return {
+      activeProvider: this.activeProvider.toUpperCase(),
       totalGroqKeys: this.groqKeys.length,
       totalNvidiaKeys: this.nvidiaKeys.length,
       groqPrimaryModel: config.groqArtifactPrimary,
-      groqFallbackModels: config.groqArtifactFallbacks,
       nvidiaPrimaryModel: config.nvidiaArtifactPrimary,
-      nvidiaFallbackModels: config.nvidiaArtifactFallbacks,
-      keys: keysReport
+      groqKeys: groqReport,
+      nvidiaKeys: nvidiaReport
     };
   }
 }

@@ -254,15 +254,18 @@ function drawExecutiveSummary(pdf, summaryText, theme, margin, contentWidth, che
  * 3. Document Section Rendering
  */
 function drawSection(pdf, section, index, theme, margin, contentWidth, checkPageBreak, bottomLimit, pageWidth, pageHeight) {
-  const headingText = (section.heading || `Section ${index + 1}`).replace(/\*\*/g, '').trim();
+  const headingText = (section.heading || section.title || `Section ${index + 1}`).replace(/\*\*/g, '').trim();
   const fontHeading = theme.fontHeading || 'Helvetica-Bold';
   const fontBody = theme.fontBody || 'Helvetica';
+
+  if (index > 0) {
+    pdf.y += 10;
+  }
 
   // 1. Draw Section Heading (H2 Level) with Keep-With-Next Protection
   if (theme.id === 'retro_pixel') {
     pdf.font(fontHeading).fontSize(13.5);
     const textH = pdf.heightOfString(headingText.toUpperCase(), { width: contentWidth, lineGap: 2 });
-    // Keep with next: heading + at least 50pt of body content
     checkPageBreak(textH + 55);
     const currentY = pdf.y;
     pdf.fillColor('#EB6B56').text(headingText.toUpperCase(), margin, currentY, { width: contentWidth, lineGap: 2 });
@@ -305,7 +308,7 @@ function drawSection(pdf, section, index, theme, margin, contentWidth, checkPage
     pdf.fillColor('#EC4899').text(headingText, margin + 18, currentY, { width: contentWidth - 18, lineGap: 2 });
     pdf.y = currentY + textH + 10;
   } else {
-    // editorial_clean (matching pdf 1.webp)
+    // editorial_clean (matching reference)
     pdf.font(fontHeading).fontSize(13.5);
     const textH = pdf.heightOfString(headingText, { width: contentWidth, lineGap: 2 });
     checkPageBreak(textH + 55);
@@ -332,9 +335,9 @@ function drawSection(pdf, section, index, theme, margin, contentWidth, checkPage
       if (!paragraph || !paragraph.trim()) return;
       const cleanParagraph = paragraph.replace(/\*\*/g, '').trim();
       pdf.font(fontBody).fontSize(9.5);
-      const pHeight = pdf.heightOfString(cleanParagraph, { width: contentWidth, lineGap: 2.5 });
+      const pHeight = pdf.heightOfString(cleanParagraph, { width: contentWidth, lineGap: 2.8 });
       checkPageBreak(pHeight + 6);
-      pdf.fillColor(theme.textPrimary || '#1F2937').text(cleanParagraph, margin, pdf.y, { width: contentWidth, lineGap: 2.5 });
+      pdf.fillColor(theme.textPrimary || '#1F2937').text(cleanParagraph, margin, pdf.y, { width: contentWidth, lineGap: 2.8 });
       pdf.y += 6;
     });
   }

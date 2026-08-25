@@ -20,12 +20,16 @@ export const pptxSkill = {
     const result = await PPTXGenerator.generate(context);
     return {
       type: 'document',
+      buffer: result.buffer,
       content: result.buffer,
       filename: result.filename,
       mimetype: result.mimetype || 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       caption: result.caption,
       title: result.title,
-      slideCount: result.slideCount
+      slideCount: result.slideCount,
+      latencyMs: result.latencyMs,
+      modelUsed: result.modelUsed,
+      keyUsed: result.keyUsed
     };
   }
 };
