@@ -81,31 +81,6 @@ export function createServer() {
       res.json({ success: true, message: 'Logs cleared.' });
     });
 
-    app.get('/api/logs/stream', (req, res) => {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      res.flushHeaders();
-
-      res.write(`data: ${JSON.stringify({ type: 'history', logs: logger.getHistory() })}\n\n`);
-
-      const logHandler = (logEntry) => {
-        res.write(`data: ${JSON.stringify({ type: 'log', log: logEntry })}\n\n`);
-      };
-
-      const clearHandler = () => {
-        res.write(`data: ${JSON.stringify({ type: 'cleared' })}\n\n`);
-      };
-
-      logger.on('log', logHandler);
-      logger.on('cleared', clearHandler);
-      req.on('close', () => {
-        logger.off('log', logHandler);
-        logger.off('cleared', clearHandler);
-      });
-    });
-
     app.post('/api/control/start', async (req, res) => { botEngine.start(); res.json({ success: true }); });
     app.post('/api/control/stop', async (req, res) => { await botEngine.stop(); res.json({ success: true }); });
     app.post('/api/control/reset_session', async (req, res) => {
@@ -144,30 +119,6 @@ export function createServer() {
       logger.clearHistory();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ success: true, message: 'Logs cleared.' }));
-    }
-    if (url.pathname === '/api/logs/stream') {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no'
-      });
-      res.write(`data: ${JSON.stringify({ type: 'history', logs: logger.getHistory() })}\n\n`);
-
-      const logHandler = (logEntry) => {
-        res.write(`data: ${JSON.stringify({ type: 'log', log: logEntry })}\n\n`);
-      };
-      const clearHandler = () => {
-        res.write(`data: ${JSON.stringify({ type: 'cleared' })}\n\n`);
-      };
-
-      logger.on('log', logHandler);
-      logger.on('cleared', clearHandler);
-      req.on('close', () => {
-        logger.off('log', logHandler);
-        logger.off('cleared', clearHandler);
-      });
-      return;
     }
     if (url.pathname === '/api/control/reset_session' && req.method === 'POST') {
       botEngine.resetSession().then(() => setTimeout(() => botEngine.start(true), 1000));

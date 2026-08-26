@@ -247,38 +247,14 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  function setupSSE() {
+  async function fetchLogs() {
     try {
-      const key = getAuthKey();
-      const sseUrl = key ? `/api/logs/stream?key=${encodeURIComponent(key)}` : "/api/logs/stream";
-      const sse = new EventSource(sseUrl);
-
-      sse.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === "cleared") {
-            if (logArea) logArea.innerHTML = "";
-            seenLogIds.clear();
-            clearedTimestamp = Date.now();
-            localStorage.setItem("terminal_cleared_timestamp", String(clearedTimestamp));
-            appendLogEntry({
-              timestamp: new Date().toISOString(),
-              level: "info",
-              message: "[SYSTEM] Production log cleared."
-            });
-          } else if (payload.type === "history" && Array.isArray(payload.logs)) {
-            payload.logs.forEach(appendLogEntry);
-          } else if (payload.type === "log" && payload.log) {
-            appendLogEntry(payload.log);
-            fetchStatus();
-          }
-        } catch (err) {}
-      };
-
-      sse.onerror = () => {
-        sse.close();
-        setTimeout(setupSSE, 5000);
-      };
+      const res = await authFetch("/api/logs");
+      if (!res.ok) return;
+      const logs = await res.json();
+      if (Array.isArray(logs)) {
+        logs.forEach(appendLogEntry);
+      }
     } catch (err) {}
   }
 
@@ -353,6 +329,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Initialize
   fetchStatus();
-  setupSSE();
-  setInterval(fetchStatus, 8000);
+  fetchLogs();
+  setInterval(fetchStatus, 6000);
+  setInterval(fetchLogs, 3000);
 });
