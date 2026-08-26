@@ -45,7 +45,7 @@ class LiveLogger extends EventEmitter {
   constructor() {
     super();
     this.logsHistory = [];
-    this.maxHistory = 100;
+    this.maxHistory = 50;
   }
 
   formatTime() {

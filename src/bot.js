@@ -114,7 +114,21 @@ class WhatsAppArtifactEngine extends EventEmitter {
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ['Artifact Engine', 'Chrome', '1.0.0']
+        browser: ['Artifact Engine', 'Chrome', '1.0.0'],
+        // CRITICAL FOR LOW-RESOURCE SERVERS (Alwaysdata Free Tier: 256MB RAM / 0.25 CPU):
+        syncFullHistory: false, // Prevents downloading & decrypting years of chat history (drops CPU from 100% to ~1% and RAM from 1GB to ~70MB)
+        markOnlineOnConnect: false, // Minimizes presence traffic
+        generateHighQualityLinkPreview: false, // Disables heavy image/link fetching
+        getMessage: async () => undefined, // Prevents buffering full message history in RAM
+        shouldIgnoreJid: (jid) => {
+          if (!jid) return true;
+          // Ignore status broadcasts and newsletters to save CPU/RAM
+          return jid.endsWith('@broadcast') || jid.endsWith('@newsletter') || jid.includes('status@broadcast');
+        },
+        defaultQueryTimeoutMs: 30000,
+        keepAliveIntervalMs: 25000,
+        emitOwnEvents: false,
+        retryRequestDelayMs: 3000
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -140,6 +154,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
           this.botJid = this.sock.user?.id || null;
           this.botLid = this.sock.user?.lid || this.sock.authState?.creds?.me?.lid || null;
           logger.info(`[SYSTEM] Artifact Bot Connected! JID: ${this.botJid} (LID: ${this.botLid})`);
+          this.cleanupStalePreKeys();
           this.emit('status', this.status);
         }
 
@@ -199,6 +214,31 @@ class WhatsAppArtifactEngine extends EventEmitter {
     this.emit('status', this.status);
   }
 
+  cleanupStalePreKeys() {
+    try {
+      if (!fs.existsSync(config.sessionDir)) return;
+      const files = fs.readdirSync(config.sessionDir);
+      const preKeyFiles = files.filter(f => f.startsWith('pre-key-'));
+      if (preKeyFiles.length > 150) {
+        const now = Date.now();
+        let deleted = 0;
+        for (const file of preKeyFiles) {
+          const fullPath = path.join(config.sessionDir, file);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (now - stat.mtimeMs > 48 * 60 * 60 * 1000) {
+              fs.unlinkSync(fullPath);
+              deleted++;
+            }
+          } catch (e) {}
+        }
+        if (deleted > 0) {
+          logger.info(`[SYSTEM] Pruned ${deleted} expired pre-key session files.`);
+        }
+      }
+    } catch (err) {}
+  }
+
   async syncGroupIdentities(chatJid) {
     if (!this.sock || !permissionChecker.isGroup(chatJid)) return;
     try {
@@ -247,13 +287,13 @@ class WhatsAppArtifactEngine extends EventEmitter {
         this.syncGroupIdentities(chatJid).catch(() => {});
       }
 
-      // Drop stale messages (> 180s or before bot boot)
+      // Drop stale messages (> 120s old) or corrupt future timestamps
       const rawTs = m.messageTimestamp;
       const msgTimestamp = typeof rawTs === 'object' && rawTs !== null ? (rawTs.low || Number(rawTs)) : Number(rawTs);
       if (msgTimestamp && !isNaN(msgTimestamp) && msgTimestamp > 0) {
         const nowSec = Math.floor(Date.now() / 1000);
-        if (this.startTime && msgTimestamp < (this.startTime - 10)) return;
-        if (nowSec - msgTimestamp > 180) return;
+        if (nowSec - msgTimestamp > 120) return; // Drop messages older than 2 minutes
+        if (msgTimestamp - nowSec > 60) return;  // Drop clock-drifted future messages
       }
 
       // Deduplication

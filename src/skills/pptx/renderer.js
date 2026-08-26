@@ -13,18 +13,18 @@ export class PPTXRenderer {
 
     let url = clean;
     if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
-      const promptQuery = `${clean} editorial photography 4k high resolution commercial studio award winning`;
-      url = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptQuery)}?width=900&height=600&nologo=true`;
+      const promptQuery = `${clean} editorial photography clean professional`;
+      // Compact 640x360 image to save memory and CPU on free-tier hosting
+      url = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptQuery)}?width=640&height=360&nologo=true`;
     }
 
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(3500) });
       if (!res.ok) return null;
       const buf = Buffer.from(await res.arrayBuffer());
-      if (!buf || buf.length < 500) return null;
+      if (!buf || buf.length < 500 || buf.length > 500000) return null;
       return `image/jpeg;base64,${buf.toString('base64')}`;
     } catch (err) {
-      logger.warn(`[PPTX:IMAGE] Image fetch notice for "${queryOrUrl}": ${err.message}`);
       return null;
     }
   }
@@ -81,13 +81,15 @@ export class PPTXRenderer {
 
     const totalSlides = spec.slides.length;
 
-    // Concurrent pre-fetch of images for visual slides
-    await Promise.all(spec.slides.map(async (slideData) => {
-      if (slideData.type === 'text_image' || slideData.type === 'image' || slideData.imageUrl || slideData.imageQuery) {
+    // Controlled pre-fetch of images for visual slides (max 2 images per deck to conserve memory)
+    let fetchedCount = 0;
+    for (const slideData of spec.slides) {
+      if ((slideData.type === 'text_image' || slideData.type === 'image' || slideData.imageUrl || slideData.imageQuery) && fetchedCount < 2) {
         const query = slideData.imageUrl || slideData.imageQuery || slideData.title;
         slideData._imageData = await this.fetchImageBase64(query);
+        if (slideData._imageData) fetchedCount++;
       }
-    }));
+    }
 
     spec.slides.forEach((slideData, idx) => {
       const slide = pres.addSlide();
