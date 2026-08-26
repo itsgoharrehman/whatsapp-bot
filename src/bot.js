@@ -98,7 +98,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
     }
 
     if (this.sock) {
-      try { await this.sock.end(); } catch (err) {}
+      try { await this.sock.end(); } catch (err) { }
       this.sock = null;
     }
 
@@ -162,20 +162,27 @@ class WhatsAppArtifactEngine extends EventEmitter {
           this.qrCodeDataUrl = null;
           this.status = 'DISCONNECTED';
           this.emit('status', this.status);
-          if (!this.isStopping) {
+
+          const statusCode = update.lastDisconnect?.error?.output?.statusCode;
+          const isLoggedOut = statusCode === (DisconnectReason?.loggedOut || 401);
+          
+          logger.warn(`[SYSTEM] Socket connection closed (Code: ${statusCode || 'Socket Drop'}). Reconnecting: ${!isLoggedOut}`);
+
+          if (!this.isStopping && !isLoggedOut) {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = setTimeout(() => this.start(), 5000);
+            this.reconnectTimer = setTimeout(() => this.start(), 3000);
           }
         }
       });
 
+      // Handle BOTH incoming messages ('notify') AND owner messages sent from linked phone ('append')
       this.sock.ev.on('messages.upsert', async (m) => {
-        if (m.type !== 'notify' || !Array.isArray(m.messages)) return;
-        m.messages.forEach(msg => {
+        if (!m || !Array.isArray(m.messages)) return;
+        for (const msg of m.messages) {
           this.handleIncomingMessage(msg).catch(err => {
             logger.error('Unhandled message error:', err.message);
           });
-        });
+        }
       });
 
     } catch (err) {
@@ -191,7 +198,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
       this.reconnectTimer = null;
     }
     if (this.sock) {
-      try { await this.sock.end(); } catch (err) {}
+      try { await this.sock.end(); } catch (err) { }
       this.sock = null;
     }
     this.status = 'DISCONNECTED';
@@ -230,13 +237,13 @@ class WhatsAppArtifactEngine extends EventEmitter {
               fs.unlinkSync(fullPath);
               deleted++;
             }
-          } catch (e) {}
+          } catch (e) { }
         }
         if (deleted > 0) {
           logger.info(`[SYSTEM] Pruned ${deleted} expired pre-key session files.`);
         }
       }
-    } catch (err) {}
+    } catch (err) { }
   }
 
   async syncGroupIdentities(chatJid) {
@@ -250,7 +257,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
           }
         }
       }
-    } catch (err) {}
+    } catch (err) { }
   }
 
   async dispatchMessage(chatJid, content, isGroup = false, originalMsg = null) {
@@ -266,20 +273,8 @@ class WhatsAppArtifactEngine extends EventEmitter {
       }
       return true;
     } catch (err) {
-      logger.warn(`Primary send to ${chatJid} failed (${err.message}). Retrying unquoted...`);
-      try {
-        const res2 = await this.sock.sendMessage(chatJid, content);
-        if (res2?.key?.id) {
-          this.sentBotMsgIds.add(res2.key.id);
-          this.sentBotMsgIds.add(`${chatJid}:${res2.key.id}`);
-          this.processedInboundMsgIds.add(res2.key.id);
-          this.processedInboundMsgIds.add(`${chatJid}:${res2.key.id}`);
-        }
-        return true;
-      } catch (err2) {
-        logger.error(`Send message to ${chatJid} failed:`, err2.message);
-        return false;
-      }
+      logger.error(`Send message to ${chatJid} failed:`, err.message);
+      return false;
     }
   }
 
@@ -296,7 +291,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
 
       const isGroup = permissionChecker.isGroup(chatJid);
       if (isGroup) {
-        this.syncGroupIdentities(chatJid).catch(() => {});
+        this.syncGroupIdentities(chatJid).catch(() => { });
       }
 
       // Drop stale messages (> 120s old) or corrupt future timestamps
@@ -333,6 +328,11 @@ class WhatsAppArtifactEngine extends EventEmitter {
       const botContext = { botJid: this.botJid, botLid: this.botLid };
       const isOwner = isFromMe || adminCommands.isOwner(senderJid, isFromMe, botContext);
       const senderLabel = isOwner ? 'OWNER' : 'USER';
+
+      // Non-owner direct messages (DMs) are dropped
+      if (!isGroup && !isOwner) {
+        return;
+      }
 
       // 1. Check for Specialized Artifact Commands (/pdf, /ppt, /pptx, etc.)
       const resolvedSkill = skillResolver.resolve(trimmedText);
