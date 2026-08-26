@@ -8,8 +8,13 @@ export default {
     if (isFromMe) return true;
     if (!senderJid) return false;
     const senderNumber = senderJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    if (config.ownerNumber && senderNumber === config.ownerNumber.replace(/[^0-9]/g, '')) return true;
-    if (botContext.botJid && senderNumber === botContext.botJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '')) return true;
+    
+    // Check against configured owner numbers
+    const ownerList = config.ownerNumbers || (config.ownerNumber ? [config.ownerNumber.replace(/[^0-9]/g, '')] : []);
+    if (ownerList.some(o => o && (senderNumber === o || senderNumber.endsWith(o) || o.endsWith(senderNumber)))) {
+      return true;
+    }
+    if (botContext.botJid && (senderNumber === botContext.botJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '') || senderJid === botContext.botJid)) return true;
     if (botContext.botLid && (senderJid === botContext.botLid || senderNumber === botContext.botLid.split('@')[0].split(':')[0].replace(/[^0-9]/g, ''))) return true;
     return false;
   },

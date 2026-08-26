@@ -266,8 +266,20 @@ class WhatsAppArtifactEngine extends EventEmitter {
       }
       return true;
     } catch (err) {
-      logger.error(`Send message to ${chatJid} failed:`, err.message);
-      return false;
+      logger.warn(`Primary send to ${chatJid} failed (${err.message}). Retrying unquoted...`);
+      try {
+        const res2 = await this.sock.sendMessage(chatJid, content);
+        if (res2?.key?.id) {
+          this.sentBotMsgIds.add(res2.key.id);
+          this.sentBotMsgIds.add(`${chatJid}:${res2.key.id}`);
+          this.processedInboundMsgIds.add(res2.key.id);
+          this.processedInboundMsgIds.add(`${chatJid}:${res2.key.id}`);
+        }
+        return true;
+      } catch (err2) {
+        logger.error(`Send message to ${chatJid} failed:`, err2.message);
+        return false;
+      }
     }
   }
 
@@ -321,11 +333,6 @@ class WhatsAppArtifactEngine extends EventEmitter {
       const botContext = { botJid: this.botJid, botLid: this.botLid };
       const isOwner = isFromMe || adminCommands.isOwner(senderJid, isFromMe, botContext);
       const senderLabel = isOwner ? 'OWNER' : 'USER';
-
-      // Non-owner direct messages (DMs) are dropped
-      if (!isGroup && !isOwner) {
-        return;
-      }
 
       // 1. Check for Specialized Artifact Commands (/pdf, /ppt, /pptx, etc.)
       const resolvedSkill = skillResolver.resolve(trimmedText);

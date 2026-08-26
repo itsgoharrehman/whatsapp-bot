@@ -30,6 +30,10 @@ export const config = {
   port: parseInt(process.env.PORT || '8100', 10),
   host: process.env.HOST || process.env.IP || '0.0.0.0',
   ownerNumber: process.env.OWNER_NUMBER ? process.env.OWNER_NUMBER.trim().replace(/[^0-9]/g, '') : '',
+  ownerNumbers: (process.env.OWNER_NUMBERS || process.env.OWNER_NUMBER || '')
+    .split(',')
+    .map(n => n.trim().replace(/[^0-9]/g, ''))
+    .filter(Boolean),
   dashboardSecret: process.env.DASHBOARD_SECRET || '',
 
   // Rate Limits & Quotas
