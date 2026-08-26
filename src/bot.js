@@ -98,7 +98,10 @@ class WhatsAppArtifactEngine extends EventEmitter {
     }
 
     if (this.sock) {
-      try { await this.sock.end(); } catch (err) { }
+      try {
+        if (this.sock.ev) this.sock.ev.removeAllListeners();
+        this.sock.end(new Error('Restarting socket'));
+      } catch (err) {}
       this.sock = null;
     }
 
@@ -116,7 +119,7 @@ class WhatsAppArtifactEngine extends EventEmitter {
         logger: pino({ level: 'silent' }),
         browser: ['Artifact Engine', 'Chrome', '1.0.0'],
         // CRITICAL FOR LOW-RESOURCE SERVERS (Alwaysdata Free Tier: 256MB RAM / 0.25 CPU):
-        syncFullHistory: false, // Prevents downloading & decrypting years of chat history (drops CPU from 100% to ~1% and RAM from 1GB to ~70MB)
+        syncFullHistory: false, // Prevents downloading & decrypting years of chat history
         markOnlineOnConnect: false, // Minimizes presence traffic
         generateHighQualityLinkPreview: false, // Disables heavy image/link fetching
         getMessage: async () => undefined, // Prevents buffering full message history in RAM
@@ -127,7 +130,6 @@ class WhatsAppArtifactEngine extends EventEmitter {
         },
         defaultQueryTimeoutMs: 30000,
         keepAliveIntervalMs: 25000,
-        emitOwnEvents: false,
         retryRequestDelayMs: 3000
       });
 
@@ -163,19 +165,20 @@ class WhatsAppArtifactEngine extends EventEmitter {
           this.status = 'DISCONNECTED';
           this.emit('status', this.status);
 
-          const statusCode = update.lastDisconnect?.error?.output?.statusCode;
+          const statusCode = update.lastDisconnect?.error?.output?.statusCode || update.lastDisconnect?.error?.statusCode;
           const isLoggedOut = statusCode === (DisconnectReason?.loggedOut || 401);
-          
-          logger.warn(`[SYSTEM] Socket connection closed (Code: ${statusCode || 'Socket Drop'}). Reconnecting: ${!isLoggedOut}`);
+          logger.warn(`[SYSTEM] Socket connection closed (Status: ${statusCode || 'Drop'}). Auto-reconnecting: ${!isLoggedOut}`);
 
           if (!this.isStopping && !isLoggedOut) {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
             this.reconnectTimer = setTimeout(() => this.start(), 3000);
+          } else if (isLoggedOut) {
+            logger.error('[SYSTEM] WhatsApp session logged out. Reset session to scan new QR.');
           }
         }
       });
 
-      // Handle BOTH incoming messages ('notify') AND owner messages sent from linked phone ('append')
+      // Process BOTH incoming messages ('notify') AND owner messages sent from linked phone ('append')
       this.sock.ev.on('messages.upsert', async (m) => {
         if (!m || !Array.isArray(m.messages)) return;
         for (const msg of m.messages) {
